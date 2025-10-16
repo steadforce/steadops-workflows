@@ -1,5 +1,5 @@
-# Steadforce steadops GitHub workflows
-This repository provides GitHub reusable workflows to share between repsitories.
+# Steadforce SteadOps GitHub workflows
+This repository provides GitHub reusable workflows to share between repositories.
 
 ## Helm unittest workflow
 The helm unittest workflow bundles helm unittest and helm linting.
