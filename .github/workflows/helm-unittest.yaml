@@ -19,48 +19,48 @@ jobs:
   unittest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - name: Set up Helm
-        uses: azure/setup-helm@v4.3.1
-        with:
-          version: ${{ inputs.helm-version }}
-      - run: |
-          set -e
-          PLUGIN_NAME="unittest"
-          DESIRED_VERSION="${{ inputs.helm-unittest-version }}"
-          PLUGIN_URL="https://github.com/helm-unittest/helm-unittest.git"
-          INSTALLED_VERSION=$(helm plugin list | awk -v name="$PLUGIN_NAME" '$1 == name {print $2}')
-          if helm plugin list | grep -q "$PLUGIN_NAME"; then
-            if [ "$INSTALLED_VERSION" != "$DESIRED_VERSION" ]; then
-              helm plugin uninstall "$PLUGIN_NAME"
-              helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
-            fi
-          else
+    - uses: actions/checkout@v5
+    - name: Set up Helm
+      uses: azure/setup-helm@v4.3.1
+      with:
+        version: ${{ inputs.helm-version }}
+    - run: |
+        set -e
+        PLUGIN_NAME="unittest"
+        DESIRED_VERSION="${{ inputs.helm-unittest-version }}"
+        PLUGIN_URL="https://github.com/helm-unittest/helm-unittest.git"
+        INSTALLED_VERSION=$(helm plugin list | awk -v name="$PLUGIN_NAME" '$1 == name {print $2}')
+        if helm plugin list | grep -q "$PLUGIN_NAME"; then
+          if [ "$INSTALLED_VERSION" != "$DESIRED_VERSION" ]; then
+            helm plugin uninstall "$PLUGIN_NAME"
             helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
           fi
-      - run: helm unittest -t JUnit -o test-output.xml . 
-      - name: Publish Test Results
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        if: ${{ !cancelled() && !env.ACT }}
-        with:
-          files: |
-            test-output.xml
-      - run: helm lint .
-      - name: Helm validation and helm unittests succeeded
-        if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT }}
-        uses: jdcargile/ms-teams-notification@v1.4
-        with:
-          github-token: ${{ github.token }}
-          ms-teams-webhook-uri: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
-          notification-summary: "&#x2705; Helm validation and helm unittests succeeded!"
-          notification-color: 28a745
-          timezone: Europe/Berlin
-      - name: Helm validation or helm unittests failed
-        if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT }}
-        uses: jdcargile/ms-teams-notification@v1.4
-        with:
-          github-token: ${{ github.token }}
-          ms-teams-webhook-uri: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
-          notification-summary: "&#x1F6A2; Helm validation or helm unittests failed!!!"
-          notification-color: dc3545
-          timezone: Europe/Berlin
+        else
+          helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
+        fi
+    - run: helm unittest -t JUnit -o test-output.xml . 
+    - name: Publish Test Results
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      if: ${{ !cancelled() && !env.ACT }}
+      with:
+        files: |
+          test-output.xml
+    - run: helm lint .
+    - name: Helm validation and helm unittests succeeded
+      if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT }}
+      uses: jdcargile/ms-teams-notification@v1.4
+      with:
+        github-token: ${{ github.token }}
+        ms-teams-webhook-uri: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+        notification-summary: "&#x2705; Helm validation and helm unittests succeeded!"
+        notification-color: 28a745
+        timezone: Europe/Berlin
+    - name: Helm validation or helm unittests failed
+      if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT }}
+      uses: jdcargile/ms-teams-notification@v1.4
+      with:
+        github-token: ${{ github.token }}
+        ms-teams-webhook-uri: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+        notification-summary: "&#x1F6A2; Helm validation or helm unittests failed!!!"
+        notification-color: dc3545
+        timezone: Europe/Berlin

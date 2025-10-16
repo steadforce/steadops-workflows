@@ -1,0 +1,86 @@
+name: Helm hydration
+
+on:
+  workflow_call:
+    inputs:
+      helm-version:
+        default: "latest"
+        description: "Helm version eg v3.19.0, defaults to latest."
+        type: string
+
+jobs:
+  define-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      hydrations: ${{ steps.hydrations.outputs.hydrations }}
+    steps:
+    - uses: actions/checkout@v5
+    - name: Define hydrations
+      id: hydrations
+      run: |
+        echo "hydrations=$(yq '.environments | keys | to_json(0)' helm-config.yaml)" >> "$GITHUB_OUTPUT"
+  get-renovate-subchart-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.renovate_subchart_version.outputs.version }}
+    steps:
+    - uses: actions/checkout@v5
+    - name: Get renovate subchart version
+      id: renovate_subchart_version
+      run: |
+        CHART_NAME=$(yq '.name' Chart.yaml)
+        echo "version=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)" >> "$GITHUB_OUTPUT"
+  hydrate-chart:
+    runs-on: ubuntu-latest
+    needs:
+    - define-matrix
+    - get-renovate-subchart-version
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      matrix:
+        hydration: ${{ fromJSON(needs.define-matrix.outputs.hydrations) }}
+    steps:
+    - uses: actions/checkout@v5
+    - name: Set up Helm
+      uses: azure/setup-helm@v4.3.1
+      with:
+        version: ${{ inputs.helm-version }}
+    - name: Update Helm dependencies
+      run: |
+        helm dependency update
+    - name: Hydrate
+      env:
+        hydration: ${{ matrix.hydration }}
+      run: |
+        CHART_NAME=$(yq 'explode(.) | .name' Chart.yaml)
+        RELEASE_NAME=$(yq 'explode(.) | .releaseName // ""' helm-config.yaml)
+        NAMESPACE=$(yq 'explode(.) | .namespace // ""' helm-config.yaml)
+        if [[ -z "$RELEASE_NAME" ]]; then
+          echo "Error: releaseName is required in helm-config.yaml" >&2
+          exit 1
+        fi
+        if [[ -z "$NAMESPACE" ]]; then
+          echo "Error: namespace is required in helm-config.yaml" >&2
+          exit 1
+        fi
+        HYADRATED_MANIFESTS=hydrated-manifests
+        helm template \
+          -a "$(hydration=$hydration yq '.environments.[env(hydration)].apis | @csv' helm-config.yaml)" \
+          -f "$(hydration=$hydration yq '.environments.[env(hydration)].valueFiles | @csv' helm-config.yaml)" \
+          -n $NAMESPACE \
+          --output-dir "${{ runner.temp }}/$HYADRATED_MANIFESTS" \
+          --include-crds \
+          --release-name $RELEASE_NAME \
+          --skip-tests \
+          .
+          mkdir -p "$HYADRATED_MANIFESTS"
+          mv -v "${{ runner.temp }}/$HYADRATED_MANIFESTS/$RELEASE_NAME/$CHART_NAME"/* "$HYADRATED_MANIFESTS/"
+    - name: Create pull request
+      if: ${{ !env.ACT }}
+      uses: peter-evans/create-pull-request@v7
+      with:
+        base: environments/${{ matrix.hydration }}
+        branch: hydration-pull-request/${{ matrix.hydration }}-${{ needs.get-renovate-subchart-version.outputs.version }}
+        title: Hydrated manifests for environment ${{ matrix.hydration }} for renovate subchart version ${{ needs.get-renovate-subchart-version.outputs.version }}
