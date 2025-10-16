@@ -3,3 +3,6 @@ This repoopsitory provides github reusable workflows to share between repsitorie
 
 ## Helm unittest workflow
 The helm unittest workflow bundles helm unittest and helm linting.
+
+### Required Secret
+- `steadops-helm-renovation-ms-teams-webhook`: MS Teams webhook URL used for notifications. **Required.**
