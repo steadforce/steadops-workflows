@@ -25,10 +25,18 @@ jobs:
         with:
           version: ${{ inputs.helm-version }}
       - run: |
-          if helm plugin list | grep -q 'unittest'; then
-            helm plugin update unittest
+          set -e
+          PLUGIN_NAME="unittest"
+          DESIRED_VERSION="${{ inputs.helm-unittest-version }}"
+          PLUGIN_URL="https://github.com/helm-unittest/helm-unittest.git"
+          INSTALLED_VERSION=$(helm plugin list | awk -v name="$PLUGIN_NAME" '$1 == name {print $2}')
+          if helm plugin list | grep -q "$PLUGIN_NAME"; then
+            if [ "$INSTALLED_VERSION" != "$DESIRED_VERSION" ]; then
+              helm plugin uninstall "$PLUGIN_NAME"
+              helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
+            fi
           else
-            helm plugin install --version ${{ inputs.helm-unittest-version }} https://github.com/helm-unittest/helm-unittest.git
+            helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
           fi
       - run: helm unittest -t JUnit -o test-output.xml . 
       - name: Publish Test Results
