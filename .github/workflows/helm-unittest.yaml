@@ -1,0 +1,52 @@
+name: Helm unittest CI
+
+on:
+  workflow_call:
+    inputs:
+      helmVersion:
+        default: "latest"
+        description: "Helm version eg v3.19.0, defaults to latest."
+        type: string
+      helmUnittestVersion:
+        default: "main"
+        description: "Helm unittest plugin version eg 1.0.3, defaults to main (latest version)."
+        type: string
+    secrets:
+      steadopsHelmRenovationMsTeamsWebhook:
+        required: true
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.3.0
+        with:
+          version: ${{ inputs.helmVersion }}
+      - run: |
+          if helm plugin list | grep -q 'unittest'; then
+            helm plugin update unittest
+          else
+            helm plugin install --version ${{ inputs.helmUnittestVersion }} https://github.com/helm-unittest/helm-unittest.git
+          fi
+      - run: helm unittest -t JUnit -o test-output.xml . 
+      - run: helm lint .
+      - name: Helm validation and helm unittests succeeded
+        if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT }}
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }}
+          ms-teams-webhook-uri: ${{ secrets.steadopsHelmRenovationMsTeamsWebhook }}
+          notification-summary: "&#x2705; Helm validation and helm unittests succeeded!"
+          notification-color: 28a745
+          timezone: Europe/Berlin
+      - name: Helm validation or helm unittests failed
+        if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT }}
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }}
+          ms-teams-webhook-uri: ${{ secrets.steadopsHelmRenovationMsTeamsWebhook }}
+          notification-summary: "&#x1F6A2; Helm validation or helm unittests failed!!!"
+          notification-color: dc3545
+          timezone: Europe/Berlin
