@@ -1,2 +1,2 @@
-# steadops-workflows
-Workflows to share between repsitories
+# Steadforce steadops github workflows
+This repoopsitory provides github reusable workflows to share between repsitories.
