@@ -33,7 +33,7 @@ jobs:
       - run: helm unittest -t JUnit -o test-output.xml . 
       - name: Publish Test Results
         uses: EnricoMi/publish-unit-test-result-action@v2
-        if: (!cancelled())
+        if: ${{ !cancelled() && !env.ACT }}
         with:
           files: |
             test-output.xml
