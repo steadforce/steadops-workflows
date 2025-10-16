@@ -31,6 +31,12 @@ jobs:
             helm plugin install --version ${{ inputs.helm-unittest-version }} https://github.com/helm-unittest/helm-unittest.git
           fi
       - run: helm unittest -t JUnit -o test-output.xml . 
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          files: |
+            test-output.xml
       - run: helm lint .
       - name: Helm validation and helm unittests succeeded
         if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT }}
