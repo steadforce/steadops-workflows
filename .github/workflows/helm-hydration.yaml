@@ -65,18 +65,18 @@ jobs:
           echo "Error: namespace is required in helm-config.yaml" >&2
           exit 1
         fi
-        HYADRATED_MANIFESTS=hydrated-manifests
+        HYDRATED_MANIFESTS=hydrated-manifests
         helm template \
           -a "$(hydration=$hydration yq '.environments.[env(hydration)].apis | @csv' helm-config.yaml)" \
           -f "$(hydration=$hydration yq '.environments.[env(hydration)].valueFiles | @csv' helm-config.yaml)" \
           -n $NAMESPACE \
-          --output-dir "${{ runner.temp }}/$HYADRATED_MANIFESTS" \
+          --output-dir "${{ runner.temp }}/$HYDRATED_MANIFESTS" \
           --include-crds \
           --release-name $RELEASE_NAME \
           --skip-tests \
           .
-          mkdir -p "$HYADRATED_MANIFESTS"
-          mv -v "${{ runner.temp }}/$HYADRATED_MANIFESTS/$RELEASE_NAME/$CHART_NAME"/* "$HYADRATED_MANIFESTS/"
+          mkdir -p "$HYDRATED_MANIFESTS"
+          mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/$CHART_NAME"/* "$HYDRATED_MANIFESTS/"
     - name: Create pull request
       if: ${{ !env.ACT }}
       uses: peter-evans/create-pull-request@v7
