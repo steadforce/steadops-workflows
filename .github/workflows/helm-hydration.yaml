@@ -34,7 +34,7 @@ jobs:
       run: |
         CHART_NAME=$(yq '.name' Chart.yaml)
         DEPENDENCY_VERSION=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)
-        if [[ "${{ inputs.bundle-patches-in-one-pr }}" == "true" ]]; then
+        if [ "${{ inputs.bundle-patches-in-one-pr }}" = "true" ]; then
           DEPENDENCY_VERSION=$(echo "$DEPENDENCY_VERSION" | cut -d. -f1,2).x
         fi
         echo "version=$DEPENDENCY_VERSION" >> "$GITHUB_OUTPUT"
