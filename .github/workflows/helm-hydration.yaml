@@ -7,6 +7,10 @@ on:
         default: "latest"
         description: "Helm version eg v3.19.0, defaults to latest."
         type: string
+      bundle-patches-in-one-pr:
+        default: "true"
+        description: "Bundle patch level chart updates in one pr/branch."
+        type: string
 
 jobs:
   define-matrix:
@@ -19,7 +23,7 @@ jobs:
       id: hydrations
       run: |
         echo "hydrations=$(yq '.environments | keys | to_json(0)' helm-config.yaml)" >> "$GITHUB_OUTPUT"
-  get-renovate-subchart-version:
+  get-subchart-version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.renovate_subchart_version.outputs.version }}
@@ -29,12 +33,16 @@ jobs:
       id: renovate_subchart_version
       run: |
         CHART_NAME=$(yq '.name' Chart.yaml)
-        echo "version=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)" >> "$GITHUB_OUTPUT"
+        DEPENDENCY_VERSION=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)
+        if [[ "${{ inputs.bundle-patches-in-one-pr }}" == "true" ]]; then
+          DEPENDENCY_VERSION=$(echo "$DEPENDENCY_VERSION" | cut -d. -f1,2).x
+        fi
+        echo "version=$DEPENDENCY_VERSION" >> "$GITHUB_OUTPUT"
   hydrate-chart:
     runs-on: ubuntu-latest
     needs:
     - define-matrix
-    - get-renovate-subchart-version
+    - get-subchart-version
     permissions:
       contents: write
       pull-requests: write
@@ -82,5 +90,5 @@ jobs:
       uses: peter-evans/create-pull-request@v7
       with:
         base: environments/${{ matrix.hydration }}
-        branch: hydration-pull-request/${{ matrix.hydration }}-${{ needs.get-renovate-subchart-version.outputs.version }}
-        title: Hydrated manifests for environment ${{ matrix.hydration }} for renovate subchart version ${{ needs.get-renovate-subchart-version.outputs.version }}
+        branch: hydration-pull-request/${{ matrix.hydration }}-${{ needs.get-subchart-version.outputs.version }}
+        title: 💧 [${{ matrix.hydration }}] Hydrated manifests for subchart version ${{ needs.get-subchart-version.outputs.version }}
