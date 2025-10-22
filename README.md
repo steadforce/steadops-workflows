@@ -13,7 +13,8 @@ rendered and tested resources are applied to your cluster.
 - Automates the rendering process, reducing manual errors.
 
 **When to use:**  
-Use this workflow when you want to automate the rendering of Helm charts as part of your GitOps pipeline, especially if you need to validate or modify manifests before deployment.
+Use this workflow when you want to automate the rendering of Helm charts as part of your GitOps pipeline, especially
+if you need to validate or modify manifests before deployment.
 
 **Usage example:**
 ```yaml
