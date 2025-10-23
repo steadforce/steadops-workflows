@@ -91,4 +91,7 @@ jobs:
       with:
         base: environments/${{ matrix.hydration }}
         branch: hydration-pull-request/${{ matrix.hydration }}-${{ needs.get-subchart-version.outputs.version }}
+        labels: |
+          hydration
+          automated pr
         title: 💧 [${{ matrix.hydration }}] Hydrated manifests for subchart version ${{ needs.get-subchart-version.outputs.version }}
