@@ -24,20 +24,20 @@ jobs:
       uses: azure/setup-helm@v4.3.1
       with:
         version: ${{ inputs.helm-version }}
-        check-latest: true
     - run: |
         set -e
         PLUGIN_NAME="unittest"
         DESIRED_VERSION="${{ inputs.helm-unittest-version }}"
         PLUGIN_URL="https://github.com/helm-unittest/helm-unittest.git"
         INSTALLED_VERSION=$(helm plugin list | awk -v name="$PLUGIN_NAME" '$1 == name {print $2}')
-        if helm plugin list | grep -q "$PLUGIN_NAME"; then
-          if [ "$INSTALLED_VERSION" != "$DESIRED_VERSION" ]; then
+        MAJOR_VERSION=$(helm version --short | grep -Eo 'v[0-9]+' | cut -d'v' -f2)
+        if helm plugin list | grep -q "$PLUGIN_NAME" && [ "$INSTALLED_VERSION" != "$DESIRED_VERSION" ]; then
             helm plugin uninstall "$PLUGIN_NAME"
-            helm plugin install --verify=false --version "$DESIRED_VERSION" "$PLUGIN_URL"
-          fi
-        else
+        fi
+        if [ "$MAJOR_VERSION" -ge 4 ]; then
           helm plugin install --verify=false --version "$DESIRED_VERSION" "$PLUGIN_URL"
+        else
+          helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
         fi
     - run: helm dependency update
     - run: helm unittest -t JUnit -o test-output.xml . 
