@@ -97,6 +97,8 @@ jobs:
           mkdir -p "$HYDRATED_MANIFESTS"
           mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/$CHART_NAME"/* "$HYDRATED_MANIFESTS/"
           mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/charts"/* "$HYDRATED_MANIFESTS/chartz" || true
+    - name: Print all files
+      run: find hydrated-manifests -type f -exec cat {} \;
     - name: Create pull request
       if: ${{ !env.ACT }}
       uses: peter-evans/create-pull-request@v7
