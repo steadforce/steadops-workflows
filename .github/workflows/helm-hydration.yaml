@@ -83,6 +83,17 @@ jobs:
           --release-name $RELEASE_NAME \
           --skip-tests \
           .
+          find "${{ runner.temp }}/$HYDRATED_MANIFESTS" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec yq -i '
+            select(.kind == "CustomResourceDefinition" and
+              .metadata.annotations["argocd.argoproj.io/sync-options"] == null)
+              .metadata.annotations["argocd.argoproj.io/sync-options"] = "ServerSideApply=true" |
+            select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-options"] != null and
+              (.metadata.annotations["argocd.argoproj.io/sync-options"] |
+              contains("ServerSideApply=") | not))
+              .metadata.annotations["argocd.argoproj.io/sync-options"] |= . + ",ServerSideApply=true" |
+            select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
+              .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
+          ' {} \;
           mkdir -p "$HYDRATED_MANIFESTS"
           mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/$CHART_NAME"/* "$HYDRATED_MANIFESTS/"
           mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/charts"/* "$HYDRATED_MANIFESTS/chartz" || true
