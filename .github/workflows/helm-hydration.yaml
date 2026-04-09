@@ -32,8 +32,11 @@ jobs:
     - name: Get renovate subchart version
       id: renovate_subchart_version
       run: |
-        CHART_NAME=$(yq '.name' Chart.yaml)
-        DEPENDENCY_VERSION=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)
+        DEPENDENCY_VERSION=$(yq 'explode(.) | .dependencies[0].version // ""' Chart.yaml)
+        if [[ -z "$DEPENDENCY_VERSION" ]]; then
+          echo "Error: no dependency found in Chart.yaml" >&2
+          exit 1
+        fi
         if [ "${{ inputs.bundle-patches-in-one-pr }}" = "true" ]; then
           DEPENDENCY_VERSION=$(echo "$DEPENDENCY_VERSION" | cut -d. -f1,2).x
         fi
