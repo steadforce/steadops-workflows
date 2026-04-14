@@ -15,7 +15,8 @@ jobs:
       with:
         fetch-depth: 0
     - name: Scan with Trufflehog
-      run: |
-        docker run --rm -v "$GITHUB_WORKSPACE:/pwd" \
-          trufflesecurity/trufflehog:latest \
-          git file:///pwd
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
