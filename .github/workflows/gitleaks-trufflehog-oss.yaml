@@ -50,7 +50,7 @@ jobs:
     - name: Skip scan when no range exists
       id: trufflehog_skip
       if: ${{ steps.refs.outputs.mode == 'skip' }}
-      run: echo "Skipping Trufflehog: no valid commit range found in this event."
+      run: echo "Skipping Trufflehog - no valid commit range found in this event."
     - name: Create Trufflehog summary
       if: always()
       shell: bash
@@ -87,7 +87,7 @@ jobs:
           echo "- Ref: ${{ github.ref_name }}"
         } >> "$GITHUB_STEP_SUMMARY"
     - name: Fail if Trufflehog scan failed
-      if: always() && steps.refs.outputs.mode == 'range' && steps.trufflehog_scan.outcome == 'failure'
+      if: ${{ always() && steps.refs.outputs.mode == 'range' && steps.trufflehog_scan.outcome == 'failure' }}
       run: |
         echo "Trufflehog scan failed. See the step logs and summary for details."
         exit 1
