@@ -28,7 +28,7 @@ jobs:
         fetch-depth: 0
     - name: Allow git workspace for container action
       run: |
-        git config --file "$RUNNER_TEMP/_github_home/.gitconfig" --add safe.directory /github/workspace
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
     - name: Scan with Gitleaks
       uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
       with:
