@@ -14,9 +14,80 @@ jobs:
       uses: actions/checkout@v6
       with:
         fetch-depth: 0
+    - name: Resolve commit range
+      id: refs
+      shell: bash
+      run: |
+        BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+        HEAD="${{ github.event.pull_request.head.sha || github.sha }}"
+        ZERO_SHA="0000000000000000000000000000000000000000"
+
+        if [[ -z "$BASE" || "$BASE" == "$ZERO_SHA" ]] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASE="$(git rev-parse HEAD~1)"
+          else
+            BASE="$HEAD"
+          fi
+        fi
+
+        MODE="range"
+        if [[ "$BASE" == "$HEAD" ]]; then
+          MODE="skip"
+        fi
+
+        echo "base=$BASE" >> "$GITHUB_OUTPUT"
+        echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+        echo "mode=$MODE" >> "$GITHUB_OUTPUT"
     - name: Scan with Trufflehog
+      id: trufflehog_scan
+      if: ${{ steps.refs.outputs.mode == 'range' }}
+      continue-on-error: true
       uses: trufflesecurity/trufflehog@main
       with:
         path: ./
-        base: ${{ github.head_ref || github.ref_name }}
-        head: HEAD
+        base: ${{ steps.refs.outputs.base }}
+        head: ${{ steps.refs.outputs.head }}
+    - name: Skip scan when no range exists
+      id: trufflehog_skip
+      if: ${{ steps.refs.outputs.mode == 'skip' }}
+      run: echo "Skipping Trufflehog: no valid commit range found in this event."
+    - name: Create Trufflehog summary
+      if: always()
+      shell: bash
+      run: |
+        status_icon() {
+          if [ "$1" = "success" ]; then
+            echo "SUCCESS"
+          elif [ "$1" = "skipped" ]; then
+            echo "SKIPPED"
+          else
+            echo "FAILED"
+          fi
+        }
+
+        SCAN_OUTCOME='${{ steps.trufflehog_scan.outcome }}'
+        MODE='${{ steps.refs.outputs.mode }}'
+
+        if [ "$MODE" = "skip" ]; then
+          SCAN_OUTCOME="skipped"
+        fi
+
+        {
+          echo "## Trufflehog Results"
+          echo
+          echo "| Check | Result |"
+          echo "| --- | --- |"
+          echo "| Commit range mode | $MODE |"
+          echo "| Trufflehog scan | $(status_icon "$SCAN_OUTCOME") |"
+          echo
+          echo "### Scan context"
+          echo "- Base: ${{ steps.refs.outputs.base }}"
+          echo "- Head: ${{ steps.refs.outputs.head }}"
+          echo "- Repository: ${{ github.repository }}"
+          echo "- Ref: ${{ github.ref_name }}"
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: Fail if Trufflehog scan failed
+      if: always() && steps.refs.outputs.mode == 'range' && steps.trufflehog_scan.outcome == 'failure'
+      run: |
+        echo "Trufflehog scan failed. See the step logs and summary for details."
+        exit 1
