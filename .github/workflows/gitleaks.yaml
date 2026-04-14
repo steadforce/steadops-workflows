@@ -1,0 +1,32 @@
+# Ensure that secrets are caught before they reach the main branch and providing a safety net for PRs.
+name: Gitleaks secret scan
+
+on:
+  workflow_call:
+    inputs:
+      gitleaks-ignore-path:
+        description: "Path to gitleaks ignore file."
+        required: false
+        type: string
+        default: ".gitleaksignore"
+  push:
+    branches:
+    - "**"
+  pull_request:
+    branches:
+    - "main"
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Scan with Gitleaks
+      uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+      with:
+        args: git --gitleaks-ignore-path ${{ inputs.gitleaks-ignore-path || '.gitleaksignore' }} --verbose
