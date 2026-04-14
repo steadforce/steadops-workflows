@@ -26,10 +26,9 @@ jobs:
       uses: actions/checkout@v6
       with:
         fetch-depth: 0
-    - name: Allow git workspace for container action
-      run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
     - name: Scan with Gitleaks
       uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+      env:
+        GIT_SAFE_DIRECTORY: /github/workspace
       with:
         args: git --gitleaks-ignore-path ${{ inputs.gitleaks-ignore-path || '.gitleaksignore' }} --verbose
