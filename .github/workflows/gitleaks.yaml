@@ -15,7 +15,7 @@ on:
   pull_request:
     branches:
     - "main"
-
+    
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
