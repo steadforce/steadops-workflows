@@ -9,12 +9,6 @@ on:
         required: false
         type: string
         default: ".gitleaksignore"
-  push:
-    branches:
-    - "**"
-  pull_request:
-    branches:
-    - "main"
     
 jobs:
   gitleaks:
@@ -28,6 +22,7 @@ jobs:
         fetch-depth: 0
     - name: Allow git workspace for container action
       run: |
+        mkdir -p "$RUNNER_TEMP/_github_home"
         git config --file "$RUNNER_TEMP/_github_home/.gitconfig" --add safe.directory /github/workspace
     - name: Scan with Gitleaks
       uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
