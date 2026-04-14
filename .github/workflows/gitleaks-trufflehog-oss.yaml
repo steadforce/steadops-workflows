@@ -3,62 +3,6 @@ name: Trufflehog secret scan
 
 on:
   workflow_call:
-    inputs:
-      scan-type:
-        description: "Type of scan: git, github, s3, or filesystem."
-        required: false
-        type: string
-        default: "git"
-      git-url:
-        description: "Git repository URL to scan (for scan-type=git)."
-        required: false
-        type: string
-      github-org:
-        description: "GitHub organization to scan (for scan-type=github)."
-        required: false
-        type: string
-      github-repo:
-        description: "GitHub repository URL to scan (for scan-type=github)."
-        required: false
-        type: string
-      github-issue-comments:
-        description: "Include GitHub issue comments in scan (for scan-type=github)."
-        required: false
-        type: boolean
-        default: false
-      github-pr-comments:
-        description: "Include GitHub PR comments in scan (for scan-type=github)."
-        required: false
-        type: boolean
-        default: false
-      s3-bucket:
-        description: "S3 bucket name to scan (for scan-type=s3)."
-        required: false
-        type: string
-      s3-role-arn:
-        description: "IAM role ARN for S3 scanning (for scan-type=s3)."
-        required: false
-        type: string
-      filesystem-paths:
-        description: "Paths to scan for filesystem scan (space-separated)."
-        required: false
-        type: string
-      results:
-        description: "Result types to report (verified, unverified, all, or comma-separated)."
-        required: false
-        type: string
-        default: "verified"
-      json-output:
-        description: "Output results as JSON."
-        required: false
-        type: boolean
-        default: false
-  push:
-    branches:
-    - "**"
-  pull_request:
-    branches:
-    - "main"
 
 jobs:
   trufflehog:
@@ -70,69 +14,8 @@ jobs:
       uses: actions/checkout@v6
       with:
         fetch-depth: 0
-    - name: Build Trufflehog command
-      id: build-command
-      shell: bash
-      run: |
-        CMD="trufflehog"
-        
-        # Determine scan type and build command
-        case "${{ inputs.scan-type }}" in
-          git)
-            if [ -z "${{ inputs.git-url }}" ]; then
-              # Local repository scan
-              CMD="$CMD git file:///pwd"
-            else
-              CMD="$CMD git ${{ inputs.git-url }}"
-            fi
-            ;;
-          github)
-            CMD="$CMD github"
-            if [ -n "${{ inputs.github-org }}" ]; then
-              CMD="$CMD --org=${{ inputs.github-org }}"
-            fi
-            if [ -n "${{ inputs.github-repo }}" ]; then
-              CMD="$CMD --repo=${{ inputs.github-repo }}"
-            fi
-            if [ "${{ inputs.github-issue-comments }}" = "true" ]; then
-              CMD="$CMD --issue-comments"
-            fi
-            if [ "${{ inputs.github-pr-comments }}" = "true" ]; then
-              CMD="$CMD --pr-comments"
-            fi
-            ;;
-          s3)
-            CMD="$CMD s3"
-            if [ -n "${{ inputs.s3-bucket }}" ]; then
-              CMD="$CMD --bucket=${{ inputs.s3-bucket }}"
-            fi
-            if [ -n "${{ inputs.s3-role-arn }}" ]; then
-              CMD="$CMD --role-arn=${{ inputs.s3-role-arn }}"
-            fi
-            ;;
-          filesystem)
-            CMD="$CMD filesystem ${{ inputs.filesystem-paths }}"
-            ;;
-          *)
-            echo "Unknown scan type: ${{ inputs.scan-type }}"
-            exit 1
-            ;;
-        esac
-        
-        # Add results filter
-        if [ -n "${{ inputs.results }}" ]; then
-          CMD="$CMD --results=${{ inputs.results }}"
-        fi
-        
-        # Add JSON output flag if requested
-        if [ "${{ inputs.json-output }}" = "true" ]; then
-          CMD="$CMD --json"
-        fi
-        
-        echo "command=$CMD" >> "$GITHUB_OUTPUT"
     - name: Scan with Trufflehog
       run: |
         docker run --rm -v "$GITHUB_WORKSPACE:/pwd" \
-          ${{ secrets.TRUFFLEHOG_DOCKER_ARGS }} \
           trufflesecurity/trufflehog:latest \
-          ${{ steps.build-command.outputs.command }}
+          git file:///pwd
