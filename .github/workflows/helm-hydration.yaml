@@ -101,7 +101,7 @@ jobs:
         mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/charts"/* "$HYDRATED_MANIFESTS/chartz" || true
     - name: Create pull request
       if: ${{ !env.ACT }}
-      uses: peter-evans/create-pull-request@v7
+      uses: peter-evans/create-pull-request@v8
       with:
         base: environments/${{ matrix.hydration }}
         branch: hydration-pull-request/${{ matrix.hydration }}-${{ needs.get-subchart-version.outputs.version }}
