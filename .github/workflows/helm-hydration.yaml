@@ -305,6 +305,13 @@ jobs:
       # Opens (or updates) one pull request per environment with the freshly
       # rendered manifests.
       #
+      # Condition:
+      #   if: ${{ !env.ACT }}  – Skips this step when the workflow is executed
+      #                          locally with `act` (https://github.com/nektos/act).
+      #                          The `ACT` environment variable is set automatically
+      #                          by act, so the step only runs in real GitHub Actions
+      #                          where a pull request can actually be opened.
+      #
       # Parameters:
       #   base    – Target branch the PR merges into; one branch per environment.
       #   branch  – Source branch created/updated with the hydrated manifests.
@@ -314,6 +321,7 @@ jobs:
       #   title   – PR title, prefixed with the 💧 emoji for immediate recognition
       #             and including the subchart version for at-a-glance traceability
       #             in the pull-request list.
+      if: ${{ !env.ACT }}
       uses: peter-evans/create-pull-request@v8.1.1
       with:
         # Only include the hydrated manifests in the PR, not any other changes
