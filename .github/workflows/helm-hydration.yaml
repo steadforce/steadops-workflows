@@ -41,6 +41,9 @@
 #                                             `environments/<name>` branch, carrying
 #                                             the rendered manifests as a commit on
 #                                             `hydration-pull-request/<name>-<version>`.
+#                                             If the target branch does not yet exist
+#                                             it is created automatically as an orphan
+#                                             branch and pushed to origin.
 
 name: Helm hydration
 
@@ -133,7 +136,9 @@ jobs:
   #   1. Installs the requested Helm version.
   #   2. Resolves all chart dependencies declared in Chart.yaml.
   #   3. Renders environment-specific Kubernetes manifests via `helm template`.
-  #   4. Opens (or updates) a pull request against the environment branch so
+  #   4. Ensures the target `environments/<name>` branch exists on origin,
+  #      creating it as an orphan branch if it does not yet exist.
+  #   5. Opens (or updates) a pull request against the environment branch so
   #      the GitOps agent (e.g. ArgoCD) can pick up the new manifests.
   #
   # Matrix variable:
@@ -263,12 +268,20 @@ jobs:
         # Fetch the environment branch from origin so that `git switch` can find
         # it locally. The actions/checkout step only fetches the default branch,
         # so this explicit fetch is required before switching.
-        git fetch origin environments/${{ matrix.hydration }}
-        # Switch to the environment branch so that the hydrated manifests are
-        # committed there rather than on the default checkout branch (main).
-        # peter-evans/create-pull-request will open a PR from the source branch
-        # against this base branch.
-        git switch environments/${{ matrix.hydration }}
+        # If the branch does not exist on origin yet, create it as an orphan
+        # branch so that the hydrated manifests have a clean history separate
+        # from the main branch.
+        if git fetch origin environments/${{ matrix.hydration }}; then
+          # Branch exists on origin – switch to the locally fetched tracking branch.
+          git switch environments/${{ matrix.hydration }}
+        else
+          # Branch does not exist yet – create an orphan branch so it has no
+          # shared history with the default branch, then push it to origin so
+          # that peter-evans/create-pull-request can open a PR against it.
+          git switch --orphan environments/${{ matrix.hydration }}
+          git commit --allow-empty -m "chore: initialise environments/${{ matrix.hydration }} branch"
+          git push origin environments/${{ matrix.hydration }}
+        fi
         # Remove any leftover output from a previous run, then create a clean directory.
         rm -rf "$HYDRATED_MANIFESTS"
         mkdir "$HYDRATED_MANIFESTS"
