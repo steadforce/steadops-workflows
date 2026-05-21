@@ -1,68 +1,217 @@
+# Helm Hydration
+#
+# This is the complete, production-ready Helm hydration pipeline. It combines
+# all building blocks: it dynamically builds a GitHub Actions job matrix from
+# the environment keys defined in `helm-config.yaml`, installs Helm, resolves
+# chart dependencies, renders environment-specific Kubernetes manifests using
+# `helm template`, and opens a version-aware pull request per environment.
+# Optionally, patch-level subchart updates are bundled into a single PR by
+# replacing the patch segment of the version with "x".
+#
+# Purpose
+# -------
+# Instead of hard-coding environment names (e.g. dev, staging, prod) inside
+# the workflow, they are read at runtime from `helm-config.yaml`.  The
+# resulting JSON array fans out into parallel jobs – one per environment –
+# each of which produces a fully rendered set of manifests ready for GitOps
+# consumption.
+#
+# Expected repository layout
+# --------------------------
+#   helm-config.yaml  – Must contain:
+#                         • A top-level `environments` map whose keys are the
+#                           target environment names, e.g.:
+#                             environments:
+#                               dev:   { ... }
+#                               prod:  { ... }
+#                         • A top-level `releaseName` (string, required)
+#                         • A top-level `namespace`   (string, required)
+#                         • Per-environment `apis` and `valueFiles` lists
+#
+# Output
+# ------
+#   define-matrix.outputs.hydrations        – JSON array of environment names,
+#                                             e.g. ["dev","prod"].
+#                                             Consumed downstream via fromJSON().
+#   get-subchart-version.outputs.version    – The primary subchart version read
+#                                             from Chart.yaml, e.g. "43.54.0".
+#   hydrated-manifests/                     – Directory tree written by helm template,
+#                                             one sub-folder per chart component.
+#   Pull request                            – One PR per environment targeting the
+#                                             `environments/<name>` branch, carrying
+#                                             the rendered manifests as a commit on
+#                                             `hydration-pull-request/<name>-<version>`.
+#                                             If the target branch does not yet exist
+#                                             it is created automatically as an orphan
+#                                             branch and pushed to origin.
+
 name: Helm hydration
 
+# This workflow is designed to be called from another workflow via `workflow_call`.
+# It exposes two inputs:
+#   helm-version           – pin the Helm CLI version for reproducible builds.
+#   bundle-patches-in-one-pr – when "true", patch-level updates are grouped into
+#                              a single PR instead of one PR per patch release.
 on:
   workflow_call:
     inputs:
       helm-version:
+        # Helm version to install. Pin to a specific version (e.g. "v3.17.0")
+        # for reproducible builds.
         default: "latest"
-        description: "Helm version eg v3.19.0, defaults to latest."
+        description: "Helm version eg v3.17.0, defaults to latest."
         type: string
       bundle-patches-in-one-pr:
+        # When "true" the patch version segment is replaced with "x" so that
+        # all patch-level subchart updates are grouped into a single PR/branch
+        # instead of creating one PR per patch release.
         default: "true"
         description: "Bundle patch level chart updates in one pr/branch."
         type: string
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Job: define-matrix
+  # Reads the top-level environment keys from helm-config.yaml and serialises
+  # them to a compact JSON array that can be used as a GitHub Actions matrix.
+  #
+  # Example output:  hydrations=["dev","prod"]
+  # ---------------------------------------------------------------------------
   define-matrix:
     runs-on: ubuntu-latest
     outputs:
+      # JSON array of environment names, e.g. ["dev","prod"]
       hydrations: ${{ steps.hydrations.outputs.hydrations }}
     steps:
-    - uses: actions/checkout@v6
+    - name: Checkout repository
+      uses: actions/checkout@v6
     - name: Define hydrations
       id: hydrations
       run: |
+        # yq extracts the keys of the `environments` map and converts them to
+        # a compact (single-line) JSON array, which is the format required by
+        # the GitHub Actions `fromJSON()` expression used in matrix definitions.
         echo "hydrations=$(yq '.environments | keys | to_json(0)' helm-config.yaml)" >> "$GITHUB_OUTPUT"
+  # ---------------------------------------------------------------------------
+  # Job: get-subchart-version
+  # Reads the primary subchart version from Chart.yaml and exposes it as a job
+  # output so that downstream jobs can embed it in branch names and PR titles.
+  #
+  # This makes every hydration PR unambiguously traceable to the chart version
+  # that produced it, and prevents branch name collisions across versions.
+  #
+  # Example output:  version=43.54.0
+  # ---------------------------------------------------------------------------
   get-subchart-version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.renovate_subchart_version.outputs.version }}
+      # The primary subchart version string, e.g. "43.54.0"
+      version: ${{ steps.get-subchart-version.outputs.version }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Get renovate subchart version
-      id: renovate_subchart_version
+    - name: Checkout repository
+      uses: actions/checkout@v6
+    - name: Get subchart version
+      id: get-subchart-version
       run: |
+        # Read the chart name from Chart.yaml to identify the primary dependency.
+        # explode(.) is not needed here because .name is a plain scalar with no anchors.
         CHART_NAME=$(yq '.name' Chart.yaml)
+        # explode(.) resolves YAML anchors and aliases before querying.
+        # Chart.yaml uses anchors (e.g. `version: &version 43.54.0`) to keep
+        # the chart version and dependency version in sync; without explode(.)
+        # yq would return the raw alias token instead of the actual value.
+        # The dependency is selected by name to be resilient to ordering changes
+        # in the dependencies list.
         DEPENDENCY_VERSION=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)
         if [ "${{ inputs.bundle-patches-in-one-pr }}" = "true" ]; then
+          # Replace the patch segment with "x" to bundle patch updates in one PR.
           DEPENDENCY_VERSION=$(echo "$DEPENDENCY_VERSION" | cut -d. -f1,2).x
         fi
         echo "version=$DEPENDENCY_VERSION" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Job: hydrate-chart
+  # Runs once per environment defined in the matrix produced by `define-matrix`.
+  # Each parallel job:
+  #   1. Installs the requested Helm version.
+  #   2. Resolves all chart dependencies declared in Chart.yaml.
+  #   3. Renders environment-specific Kubernetes manifests via `helm template`.
+  #   4. Ensures the target `environments/<name>` branch exists on origin,
+  #      creating it as an orphan branch if it does not yet exist.
+  #   5. Opens (or updates) a pull request against the environment branch so
+  #      the GitOps agent (e.g. ArgoCD) can pick up the new manifests.
+  #
+  # Matrix variable:
+  #   hydration – the environment name for this job instance, e.g. "dev" or "prod"
+  # ---------------------------------------------------------------------------
   hydrate-chart:
     runs-on: ubuntu-latest
     needs:
     - define-matrix
     - get-subchart-version
+    # Permissions required by the `Create pull request` step:
+    #   contents: write       – push the hydrated-manifests source branch.
+    #   pull-requests: write  – open / update the PR against the environment branch.
     permissions:
       contents: write
       pull-requests: write
     strategy:
+      # Run all environment jobs in parallel. fail-fast is set to false so that
+      # a failing matrix job does not cancel sibling jobs.
+      fail-fast: false
       matrix:
         hydration: ${{ fromJSON(needs.define-matrix.outputs.hydrations) }}
     steps:
-    - uses: actions/checkout@v6
+    - name: Checkout repository
+      uses: actions/checkout@v6
     - name: Set up Helm
+      # Installs the Helm CLI at the version requested via the workflow input.
+      # Pinning to a specific version (e.g. "v3.17.0") ensures reproducible builds.
       uses: azure/setup-helm@v5.0.0
       with:
         version: ${{ inputs.helm-version }}
+    - name: Verify Helm installation
+      # Prints the installed Helm version to the job log, confirming that the
+      # setup step succeeded and making the exact version traceable in CI output.
+      run: |
+        helm version
     - name: Update Helm dependencies
+      # Downloads all chart dependencies declared in Chart.yaml into charts/.
+      # This must run before templating or packaging to ensure all sub-charts
+      # are present in the local cache.
       run: |
         helm dependency update
     - name: Hydrate
+      # Renders Kubernetes manifests for the current environment using
+      # `helm template`.  All rendered files are written to a temporary
+      # directory (`$RUNNER_TEMP/hydrated-manifests`) so that intermediate
+      # state is never accidentally committed.
+      #
+      # Variables read from helm-config.yaml:
+      #   releaseName  – Helm release name (required).
+      #   namespace    – Kubernetes namespace (required).
+      #   apis         – Comma-separated list of additional Kubernetes API
+      #                  groups passed via `-a` to enable conditional rendering
+      #                  of resources that depend on CRDs or optional APIs.
+      #   valueFiles   – Comma-separated list of values files for the
+      #                  current environment, passed via `-f`.
+      #
+      # helm template flags used:
+      #   -a  (--api-versions)   Enable extra API groups for `Capabilities` checks.
+      #   -f  (--values)         Merge environment-specific values files.
+      #   -n  (--namespace)      Set the release namespace.
+      #   --output-dir           Write each rendered manifest to a file instead
+      #                          of stdout, preserving the chart directory layout.
+      #   --include-crds         Include CRD manifests in the output.
+      #   --release-name         Override the release name used in templates.
+      #   --skip-tests           Omit test hook manifests from the output.
       env:
         hydration: ${{ matrix.hydration }}
       run: |
-        CHART_NAME=$(yq 'explode(.) | .name' Chart.yaml)
+        # explode(.) resolves YAML anchors and aliases before querying.
+        # Chart.yaml and helm-config.yaml may use anchors (e.g. `name: &name renovate`)
+        # to avoid repetition; without explode(.) yq returns the raw alias token
+        # (e.g. *name) instead of the actual string value.
         RELEASE_NAME=$(yq 'explode(.) | .releaseName // ""' helm-config.yaml)
         NAMESPACE=$(yq 'explode(.) | .namespace // ""' helm-config.yaml)
         if [[ -z "$RELEASE_NAME" ]]; then
@@ -74,6 +223,8 @@ jobs:
           exit 1
         fi
         HYDRATED_MANIFESTS=hydrated-manifests
+        # Render templates to a temporary directory to avoid committing
+        # intermediate files before post-processing is complete.
         helm template \
           -a "$(hydration=$hydration yq '.environments.[env(hydration)].apis | @csv' helm-config.yaml)" \
           -f "$(hydration=$hydration yq '.environments.[env(hydration)].valueFiles | @csv' helm-config.yaml)" \
@@ -83,8 +234,26 @@ jobs:
           --release-name $RELEASE_NAME \
           --skip-tests \
           .
-        # Add ServerSideApply=true to sync-options if ServerSideApply is not defined
-        # Set sync-wave to -1 if sync-wave is not defined
+        # Post-process all rendered YAML manifests to inject ArgoCD annotations
+        # required for reliable CRD management via server-side apply.
+        #
+        # Why server-side apply for CRDs?
+        #   CRD manifests often carry large `last-applied-configuration` annotations
+        #   that exceed the 256 KiB annotation size limit enforced by Kubernetes.
+        #   Using ServerSideApply=true tells ArgoCD to apply them with server-side
+        #   apply (SSA), which avoids storing the full manifest in annotations.
+        #
+        # Why sync-wave "-1"?
+        #   Setting the sync-wave to -1 ensures CRDs are applied before all other
+        #   resources (wave 0 and above), so that custom resources that depend on
+        #   them are never applied before their CRD exists in the cluster.
+        #
+        # The yq expression handles three cases for each CRD manifest:
+        #   1. No sync-options annotation at all → create it with "ServerSideApply=true".
+        #   2. sync-options annotation exists but does not contain "ServerSideApply=" →
+        #      append ",ServerSideApply=true" to the existing value.
+        #   3. No sync-wave annotation → create it with "-1".
+        #      (If sync-wave is already set it is left unchanged.)
         find "${{ runner.temp }}/$HYDRATED_MANIFESTS" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec yq -i '
           select(.kind == "CustomResourceDefinition" and
             .metadata.annotations["argocd.argoproj.io/sync-options"] == null)
@@ -96,14 +265,74 @@ jobs:
           select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
             .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
         ' {} \;
-        mkdir -p "$HYDRATED_MANIFESTS"
-        mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/$CHART_NAME"/* "$HYDRATED_MANIFESTS/"
-        mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS/$RELEASE_NAME/charts"/* "$HYDRATED_MANIFESTS/chartz" || true
+        # Fetch the environment branch from origin so that `git switch` can find
+        # it locally. The actions/checkout step only fetches the default branch,
+        # so this explicit fetch is required before switching.
+        # If the branch does not exist on origin yet, create it as an orphan
+        # branch so that the hydrated manifests have a clean history separate
+        # from the main branch.
+        if git fetch origin environments/${{ matrix.hydration }}; then
+          # Branch exists on origin – switch to the locally fetched tracking branch.
+          git switch environments/${{ matrix.hydration }}
+        else
+          # Branch does not exist yet – create an orphan branch so it has no
+          # shared history with the default branch, then push it to origin so
+          # that peter-evans/create-pull-request can open a PR against it.
+          git switch --orphan environments/${{ matrix.hydration }}
+          git commit --allow-empty -m "chore: initialise environments/${{ matrix.hydration }} branch"
+          git push origin environments/${{ matrix.hydration }}
+        fi
+        # Remove any leftover output from a previous run, then create a clean directory.
+        rm -rf "$HYDRATED_MANIFESTS"
+        mkdir "$HYDRATED_MANIFESTS"
+        # Move all rendered manifests (root chart and sub-charts) from the
+        # temporary output directory into the working directory.
+        mv -v "${{ runner.temp }}/$HYDRATED_MANIFESTS"/* "$HYDRATED_MANIFESTS/"
+        # Stage the rendered manifests so that peter-evans/create-pull-request
+        # picks them up as the commit content for the hydration PR.
+        git add "$HYDRATED_MANIFESTS"
+        # Remove untracked files left behind by helm template (e.g. temporary
+        # chart files) so the working tree is clean before the PR action runs.
+        # -f (force) is required because Git refuses to remove files without it.
+        git clean -f
+    - name: Git status
+      # Prints the current git status to the job log for debugging purposes.
+      # Useful for verifying which files were staged by `git add` and confirming
+      # that the hydrated manifests are ready to be committed.
+      run: |
+        git status
     - name: Create pull request
+      # Opens (or updates) one pull request per environment with the freshly
+      # rendered manifests.
+      #
+      # Condition:
+      #   if: ${{ !env.ACT }}  – Skips this step when the workflow is executed
+      #                          locally with `act` (https://github.com/nektos/act).
+      #                          The `ACT` environment variable is set automatically
+      #                          by act, so the step only runs in real GitHub Actions
+      #                          where a pull request can actually be opened.
+      #
+      # Parameters:
+      #   base    – Target branch the PR merges into; one branch per environment.
+      #   branch  – Source branch created/updated with the hydrated manifests.
+      #             Includes the subchart version so that each chart version gets
+      #             its own branch and open PRs from different versions coexist.
+      #   labels  – Labels applied to the PR for filtering and automation rules.
+      #   title   – PR title, prefixed with the 💧 emoji for immediate recognition
+      #             and including the subchart version for at-a-glance traceability
+      #             in the pull-request list.
       if: ${{ !env.ACT }}
-      uses: peter-evans/create-pull-request@v8
+      uses: peter-evans/create-pull-request@v8.1.1
       with:
+        # Only include the hydrated manifests in the PR, not any other changes
+        # that may be present in the source branch.
+        add-paths: |
+          hydrated-manifests/
+        # Target branch: one long-lived branch per environment holds the latest
+        # hydrated state and is watched by the GitOps agent (e.g. ArgoCD).
         base: environments/${{ matrix.hydration }}
+        # Source branch: includes the subchart version so that parallel PRs for
+        # different chart versions never overwrite each other's branch.
         branch: hydration-pull-request/${{ matrix.hydration }}-${{ needs.get-subchart-version.outputs.version }}
         labels: |
           hydration
