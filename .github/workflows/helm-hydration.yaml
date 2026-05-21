@@ -278,6 +278,14 @@ jobs:
           # Branch does not exist yet – create an orphan branch so it has no
           # shared history with the default branch, then push it to origin so
           # that peter-evans/create-pull-request can open a PR against it.
+          #
+          # A git identity must be configured before committing because the
+          # GitHub Actions runner has no global git user set by default.
+          # github.actor_id and github.actor are built-in context variables, so
+          # no API call is needed to construct the standard GitHub noreply address
+          # (<id>+<login>@users.noreply.github.com).
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           git switch --orphan environments/${{ matrix.hydration }}
           git commit --allow-empty -m "chore: initialise environments/${{ matrix.hydration }} branch"
           git push origin environments/${{ matrix.hydration }}
