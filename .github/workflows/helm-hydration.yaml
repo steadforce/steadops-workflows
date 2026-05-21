@@ -281,17 +281,11 @@ jobs:
           #
           # A git identity must be configured before committing because the
           # GitHub Actions runner has no global git user set by default.
-          # The actor's GitHub noreply address (<id>+<login>@users.noreply.github.com)
-          # is used so the commit is attributed to the person who triggered the
-          # workflow. The numeric user ID is fetched via the GitHub REST API
-          # because it is not exposed as a built-in context variable.
-          ACTOR_ID=$(curl -s \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/users/${{ github.actor }}" \
-            | jq -r '.id')
+          # github.actor_id and github.actor are built-in context variables, so
+          # no API call is needed to construct the standard GitHub noreply address
+          # (<id>+<login>@users.noreply.github.com).
           git config user.name "${{ github.actor }}"
-          git config user.email "${ACTOR_ID}+${{ github.actor }}@users.noreply.github.com"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           git switch --orphan environments/${{ matrix.hydration }}
           git commit --allow-empty -m "chore: initialise environments/${{ matrix.hydration }} branch"
           git push origin environments/${{ matrix.hydration }}
