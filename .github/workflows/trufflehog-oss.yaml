@@ -1,4 +1,33 @@
-# Scan for leaked secrets using Trufflehog OSS before they reach the main branch.
+# Trufflehog Secret Scan
+#
+# Scans commits for leaked secrets using Trufflehog OSS before they reach the
+# main branch. Works for both pull requests and direct pushes by automatically
+# resolving the relevant commit range from the event context.
+#
+# Purpose
+# -------
+# Detect accidentally committed secrets (API keys, passwords, tokens, etc.)
+# early in the development workflow. Unlike whole-history scanners, Trufflehog
+# operates on a targeted commit range, reducing noise and scan time while still
+# catching secrets in the diff that matters.
+#
+# Inputs
+# ------
+#   None. The commit range is derived automatically from the GitHub event
+#   context (pull request base/head SHAs or push before/after SHAs).
+#
+# Commit range resolution
+# -----------------------
+#   Pull request event  → base: PR base SHA,   head: PR head SHA
+#   Push event          → base: event.before,  head: github.sha
+#   Fallback (no base)  → base: HEAD~1,        head: HEAD
+#   Single commit repo  → mode: skip (no range possible)
+#
+# Outputs (step outputs, internal use)
+# -------------------------------------
+#   refs.base  – Base commit SHA for the Trufflehog scan range.
+#   refs.head  – Head commit SHA for the Trufflehog scan range.
+#   refs.mode  – "range" (scan will run) or "skip" (no valid range).
 name: Trufflehog secret scan
 
 on:
@@ -8,13 +37,42 @@ jobs:
   trufflehog:
     runs-on: ubuntu-latest
     permissions:
+      # Read-only access to repository contents is sufficient for scanning.
       contents: read
     steps:
     - name: Checkout repository
+      # fetch-depth: 0 checks out the full git history so that the base commit
+      # SHA resolved in the next step is guaranteed to be present locally.
+      # Without this, `git cat-file` and `git rev-parse` may fail to find
+      # commits that are not in the shallow clone.
       uses: actions/checkout@v6
       with:
         fetch-depth: 0
     - name: Resolve commit range
+      # Determines the base and head SHAs that define the range of commits to
+      # scan. The resolution logic handles four distinct event scenarios:
+      #
+      #   1. Pull request event:
+      #      github.event.pull_request.base.sha  → base (the target branch tip)
+      #      github.event.pull_request.head.sha  → head (the PR branch tip)
+      #
+      #   2. Push event:
+      #      github.event.before  → base (the commit before the push)
+      #      github.sha           → head (the commit after the push)
+      #
+      #   3. No valid base (empty, all-zeros, or not reachable in history):
+      #      Falls back to HEAD~1 as base if the repository has more than one
+      #      commit. This handles force-pushes, branch creations, and other
+      #      events where `event.before` is the zero SHA.
+      #
+      #   4. Single-commit repository (HEAD~1 does not exist):
+      #      Sets mode=skip so the scan step is skipped entirely, avoiding a
+      #      fatal git error. The summary will report SKIPPED instead of FAILED.
+      #
+      # ZERO_SHA check: GitHub sets event.before to the zero SHA (40 zeros)
+      # on the very first push to a branch, which is not a valid commit object.
+      # git cat-file -e verifies the SHA exists in the local object store as
+      # a defence against stale or invalid SHAs from the event payload.
       id: refs
       shell: bash
       run: |
@@ -39,6 +97,19 @@ jobs:
         echo "head=$HEAD" >> "$GITHUB_OUTPUT"
         echo "mode=$MODE" >> "$GITHUB_OUTPUT"
     - name: Scan with Trufflehog
+      # Scans only the resolved commit range rather than the full history.
+      # This keeps scan time proportional to the size of the change, not the
+      # repository history.
+      #
+      # continue-on-error: true  – Prevents the step from immediately failing
+      #   the job so that the summary step always runs and produces a report.
+      #   The actual job failure is enforced by the dedicated
+      #   "Fail if Trufflehog scan failed" step below, which runs after the
+      #   summary has been written.
+      #
+      # if: mode == 'range'  – Skips the scan entirely when no valid commit
+      #   range could be resolved (single-commit repository or force-push with
+      #   no history).
       id: trufflehog_scan
       if: ${{ steps.refs.outputs.mode == 'range' }}
       continue-on-error: true
@@ -48,10 +119,19 @@ jobs:
         base: ${{ steps.refs.outputs.base }}
         head: ${{ steps.refs.outputs.head }}
     - name: Skip scan when no range exists
+      # Emits an informational message when the scan is intentionally skipped
+      # so that the job log is explicit about the reason rather than showing
+      # a silent no-op.
       id: trufflehog_skip
       if: ${{ steps.refs.outputs.mode == 'skip' }}
       run: echo "Skipping Trufflehog - no valid commit range found in this event."
     - name: Create Trufflehog summary
+      # Writes a Markdown results table to the GitHub Actions step summary
+      # ($GITHUB_STEP_SUMMARY) so the scan outcome is visible directly in the
+      # workflow run UI without needing to expand individual step logs.
+      #
+      # if: always()  – Ensures the summary is written regardless of whether
+      #   earlier steps succeeded, failed, or were skipped.
       if: always()
       shell: bash
       run: |
@@ -87,6 +167,12 @@ jobs:
           echo "- Ref: ${{ github.ref_name }}"
         } >> "$GITHUB_STEP_SUMMARY"
     - name: Fail if Trufflehog scan failed
+      # Fails the job explicitly after the summary has been written.
+      # This step runs after "Create Trufflehog summary" because
+      # continue-on-error: true on the scan step suppressed the failure there.
+      # Using always() combined with the outcome check ensures this step only
+      # fails the job when the scan genuinely detected secrets, not when it was
+      # skipped or when the summary step itself failed.
       if: ${{ always() && steps.refs.outputs.mode == 'range' && steps.trufflehog_scan.outcome == 'failure' }}
       run: |
         echo "Trufflehog scan failed. See the step logs and summary for details."

@@ -1,3 +1,37 @@
+# Helm Unittest CI
+#
+# Runs Helm unit tests and linting for a Helm chart. Optionally sends
+# MS Teams notifications on Renovate dependency-update branches to provide
+# immediate feedback on whether an automated chart version bump is safe to merge.
+#
+# Purpose
+# -------
+# Catch rendering errors, misconfigured values, and broken templates as early
+# as possible in the pull-request lifecycle, before any manifest reaches the
+# cluster. Linting additionally enforces Helm best practices.
+#
+# Inputs
+# ------
+#   helm-version          – Helm CLI version to install. Pin to a specific
+#                           version (e.g. "v3.19.0") for reproducible builds.
+#                           Defaults to "latest".
+#   helm-unittest-version – Version of the helm-unittest plugin to install
+#                           (e.g. "1.0.3"). Defaults to "main" (latest).
+#                           Pinning is recommended for reproducible builds.
+#
+# Secrets
+# -------
+#   steadops-helm-renovation-ms-teams-webhook – MS Teams incoming webhook URL.
+#     Notifications are only sent on branches matching `renovate/` so the
+#     secret must be present in the calling repository even if notifications
+#     are not needed for manual PRs.
+#
+# Expected repository layout
+# --------------------------
+#   Chart.yaml        – Required by `helm dependency update` and `helm lint`.
+#   tests/            – Directory containing helm-unittest test files
+#                       (*.yaml with `suite:` key). Required by `helm unittest`.
+
 name: Helm unittest CI
 
 on:
@@ -21,10 +55,19 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Set up Helm
+      # Installs the Helm CLI at the version requested via the workflow input.
+      # Pinning to a specific version (e.g. "v3.19.0") ensures reproducible builds.
       uses: azure/setup-helm@v5.0.0
       with:
         version: ${{ inputs.helm-version }}
-    - run: |
+    - name: Install helm-unittest plugin
+      # Installs the helm-unittest plugin at the requested version.
+      # The script first checks whether the plugin is already installed at the
+      # desired version to avoid unnecessary reinstalls on cached runners.
+      # Helm v4 introduced a breaking change requiring --verify=false for
+      # plugins installed from git URLs without a GPG signature; the Helm
+      # major version is detected at runtime to handle both v3 and v4.
+      run: |
         set -e
         PLUGIN_NAME="unittest"
         DESIRED_VERSION="${{ inputs.helm-unittest-version }}"
@@ -42,16 +85,37 @@ jobs:
             helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
           fi
         fi
-    - run: helm dependency update
-    - run: helm unittest -t JUnit -o test-output.xml . 
+    - name: Update Helm dependencies
+      # Downloads all chart dependencies declared in Chart.yaml into charts/.
+      # Must run before templating or testing to ensure all sub-charts are
+      # present locally.
+      run: helm dependency update
+    - name: Run Helm unittests
+      # Runs all helm-unittest test suites found in the chart.
+      # -t JUnit  outputs results in JUnit XML format so they can be picked up
+      #           by the Publish Test Results step below.
+      # -o        writes the XML report to test-output.xml in the workspace.
+      run: helm unittest -t JUnit -o test-output.xml .
     - name: Publish Test Results
+      # Parses the JUnit XML report and publishes a test result summary to the
+      # GitHub Actions UI (check run annotations and job summary).
+      # Skipped when running locally with `act` (!env.ACT) since the GitHub
+      # Checks API is unavailable outside of real GitHub Actions.
+      # if: !cancelled() ensures results are published even when tests fail,
+      # so the failure details are always visible in the PR.
       uses: EnricoMi/publish-unit-test-result-action@v2
       if: ${{ !cancelled() && !env.ACT }}
       with:
         files: |
           test-output.xml
-    - run: helm lint .
+    - name: Lint Helm chart
+      # Runs `helm lint` to validate chart structure, required fields, and
+      # template syntax. Fails the job if any linting errors are found.
+      run: helm lint .
     - name: Helm validation and helm unittests succeeded
+      # Sends a success notification to MS Teams on Renovate branches so the
+      # team can quickly approve automated dependency-update PRs with confidence.
+      # Only runs on branches matching `renovate/` and not when using `act`.
       if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT }}
       uses: jdcargile/ms-teams-notification@v1.4
       with:
@@ -61,6 +125,10 @@ jobs:
         notification-color: 28a745
         timezone: Europe/Berlin
     - name: Helm validation or helm unittests failed
+      # Sends a failure notification to MS Teams on Renovate branches so the
+      # team is immediately alerted that an automated dependency update broke
+      # the chart and the PR should not be merged.
+      # Only runs on branches matching `renovate/` and not when using `act`.
       if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT }}
       uses: jdcargile/ms-teams-notification@v1.4
       with:
