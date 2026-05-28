@@ -1,4 +1,4 @@
-# Ensure that secrets are caught before they reach the main branch and providing a safety net for PRs.
+# Ensure that secrets are caught before they reach the main branch and provide a safety net for PRs.
 name: Gitleaks secret scan
 
 on:
