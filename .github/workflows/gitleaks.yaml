@@ -1,4 +1,28 @@
-# Ensure that secrets are caught before they reach the main branch and provide a safety net for PRs.
+# Gitleaks Secret Scan
+#
+# Scans the full git history for leaked secrets using Gitleaks before they
+# reach the main branch. Provides a safety net for both pull requests and
+# direct pushes.
+#
+# Purpose
+# -------
+# Detect accidentally committed secrets (API keys, passwords, tokens, etc.)
+# early in the development workflow. The scan runs against the complete git
+# history so that secrets introduced in any commit are caught, not only the
+# latest one.
+#
+# Inputs
+# ------
+#   gitleaks-ignore-path  – Path to a .gitleaksignore file that lists patterns
+#                           to suppress. Defaults to ".gitleaksignore" in the
+#                           repository root. Use this to silence known
+#                           false-positives without modifying the workflow.
+#
+# Expected repository layout
+# --------------------------
+#   .gitleaksignore  – (optional) List of findings to suppress, one pattern
+#                      per line. Only required when the default ignore path is
+#                      used and false-positives need to be suppressed.
 name: Gitleaks secret scan
 
 on:
@@ -14,17 +38,38 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     permissions:
+      # Read-only access to repository contents is sufficient for scanning.
       contents: read
     steps:
     - name: Checkout repository
+      # fetch-depth: 0 checks out the full git history so that Gitleaks can
+      # scan all commits, not just the latest snapshot. Without this, secrets
+      # introduced in earlier commits would go undetected.
       uses: actions/checkout@v6
       with:
         fetch-depth: 0
     - name: Allow git workspace for container action
+      # The Gitleaks step runs as a Docker container action. Container actions
+      # on GitHub Actions runners execute inside a container where the
+      # workspace is mounted at /github/workspace. Git's safe.directory
+      # protection (introduced in Git 2.35.2) rejects operations on
+      # directories owned by a different user, which causes Gitleaks to fail
+      # when it invokes git internally.
+      # Writing the safe.directory config into $RUNNER_TEMP/_github_home
+      # targets the home directory that GitHub Actions injects into the
+      # container via the HOME environment variable, ensuring the config is
+      # picked up by git inside the container without affecting the host runner.
       run: |
         mkdir -p "$RUNNER_TEMP/_github_home"
         git config --file "$RUNNER_TEMP/_github_home/.gitconfig" --add safe.directory /github/workspace
     - name: Scan with Gitleaks
+      # Runs Gitleaks in `git` mode, which walks the full commit history using
+      # git log rather than scanning the working tree. This catches secrets
+      # that were committed and later deleted.
+      # --gitleaks-ignore-path  Points to the ignore file for suppressing
+      #                         known false-positives.
+      # --verbose               Prints each finding to the job log for easier
+      #                         triage without needing to download artefacts.
       uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
       with:
         args: git --gitleaks-ignore-path ${{ inputs.gitleaks-ignore-path || '.gitleaksignore' }} --verbose
