@@ -167,7 +167,7 @@ jobs:
     - name: Set up Helm
       # Installs the Helm CLI at the version requested via the workflow input.
       # Pinning to a specific version (e.g. "v3.17.0") ensures reproducible builds.
-      uses: azure/setup-helm@v5.0.0
+      uses: azure/setup-helm@v5.0.1
       with:
         version: ${{ inputs.helm-version }}
     - name: Verify Helm installation
