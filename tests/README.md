@@ -17,7 +17,7 @@ that proposes it.
 |---|---|
 | `fixtures/upstream/` | Stub charts the fixtures depend on via `file://`, so the tests need no chart repository |
 | `fixtures/single-chart/` | One chart at the root of a `charts-root`, the one-chart-per-repository layout |
-| `fixtures/monorepo/` | Two charts below a shared root |
+| `fixtures/monorepo/` | Three charts below a shared root |
 | `golden/hydrated-<chart>-<environment>/` | Expected manifests, one directory per artifact the workflow publishes |
 
 ### What the fixtures cover
@@ -32,6 +32,10 @@ that proposes it.
   `sync-options`, which are the two paths through the annotation post-processing.
 - Templates owned by the umbrella chart next to the templates of the upstream
   chart.
+- A chart that does not commit `Chart.lock` and pins its dependency with a
+  version range (`monorepo/service-c`), which is the layout of a repository that
+  git-ignores the lock file. Its lock is git-ignored so the fixture keeps that
+  shape.
 
 ### Updating the goldens
 

@@ -30,8 +30,8 @@ if you need to validate or modify manifests before deployment.
 **Required repository layout:**
 
 Every directory holding a `helm-config.yaml` is treated as a chart and must also
-contain `Chart.yaml` and a committed `Chart.lock`. With the default inputs only
-the repository root is searched, which is the one-chart-per-repository layout.
+contain `Chart.yaml`. With the default inputs only the repository root is
+searched, which is the one-chart-per-repository layout.
 
 ```yaml
 releaseName: my-chart       # required
@@ -53,12 +53,28 @@ environments:
 `valueFiles` paths are relative to the chart directory. Anchors and aliases are
 resolved, so environments sharing a definition can be written once and reused.
 
-The version reported in the branch name and PR title is read from `Chart.lock`
-for the chart's *primary dependency* — the subchart whose version identifies the
+The version reported in the branch name and PR title is the resolved version of
+the chart's *primary dependency* — the subchart whose version identifies the
 chart. It defaults to the dependency sharing the chart's own name. Umbrella
 charts wrapping an upstream chart of a different name (for example a chart named
 `prometheus-operator` depending on `kube-prometheus-stack`) name it explicitly
-via `primaryDependency`.
+via `primaryDependency`. A chart without any dependencies reports its own
+version from `Chart.yaml`.
+
+**Chart.lock:**
+
+Committing `Chart.lock` is recommended but not required.
+
+| | Committed | Not committed |
+|---|---|---|
+| Dependency install | `helm dependency build`, exactly the pinned versions | `helm dependency update`, constraints re-resolved on every run |
+| Reproducibility | Manifests are a function of the commit | An upstream release can change the manifests with no commit |
+| Reported version | The pinned version | The version resolved during the run |
+| Workflow output | — | A warning naming the chart |
+
+Either way the reported version is the one that was actually installed, so it is
+always a concrete semver and safe inside a git branch name. Repositories that
+git-ignore the lock file keep working unchanged.
 
 **Repositories holding several charts:**
 

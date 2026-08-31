@@ -36,8 +36,9 @@
 #                         • Per-environment `apis` and `valueFiles` lists
 #                         • An optional `primaryDependency` naming the subchart
 #                           whose version identifies the chart
-#   Chart.lock        – Must be committed. It pins the subchart versions that
-#                       are installed and rendered.
+#   Chart.lock        – Should be committed. It pins the subchart versions that
+#                       are installed and rendered. Without it the versions are
+#                       resolved at render time and the workflow warns.
 #
 # Output
 # ------
@@ -234,8 +235,8 @@ jobs:
   # Runs once per chart and environment in the matrix produced by
   # `define-matrix`. Each parallel job:
   #   1. Installs the requested Helm version.
-  #   2. Resolves the chart name and the primary subchart version from Chart.lock.
-  #   3. Installs the chart dependencies pinned in Chart.lock.
+  #   2. Installs the chart dependencies, pinned by Chart.lock when it exists.
+  #   3. Resolves the chart name and the primary subchart version.
   #   4. Renders environment-specific Kubernetes manifests via `helm template`.
   #   5. Collects them under `hydrated-manifests`, on the `environments/<name>`
   #      branch when a pull request is created.
@@ -280,6 +281,23 @@ jobs:
       # setup step succeeded and making the exact version traceable in CI output.
       run: |
         helm version
+    - name: Build Helm dependencies
+      # Installs the subcharts into charts/. This must run before the version is
+      # resolved and before templating, because it is what produces Chart.lock
+      # for a chart that does not commit one.
+      env:
+        CHART_DIR: ${{ matrix.entry.chart }}
+      run: |
+        set -euo pipefail
+        if [ -f "$CHART_DIR/Chart.lock" ]; then
+          # The committed lock file decides which versions are installed, which
+          # makes the rendered manifests a function of the commit alone. This
+          # fails when Chart.lock and Chart.yaml disagree.
+          helm dependency build "$CHART_DIR"
+        else
+          echo "::warning::$CHART_DIR/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change the rendered manifests without a commit. Run 'helm dependency update' and commit the lock file."
+          helm dependency update "$CHART_DIR"
+        fi
     - name: Resolve chart metadata
       # Derives everything that depends on which chart is being hydrated: the
       # chart name, the directory the manifests are written to, the suffix that
@@ -314,19 +332,22 @@ jobs:
         if [ -z "$DEP_NAME" ]; then
           DEP_NAME=$CHART_NAME
         fi
-        if [ ! -f "$CHART_DIR/Chart.lock" ]; then
-          echo "::error::$CHART_DIR/Chart.lock is missing. Run 'helm dependency update' locally and commit the lock file."
-          exit 1
-        fi
-        # Chart.lock holds the version that `helm dependency build` installs, so
-        # the reported version always matches the rendered manifests. It is also
-        # always a concrete semver, which keeps it valid inside a git branch name.
+        # Chart.lock records the version installed by the previous step, so the
+        # reported version always matches the rendered manifests. It is also
+        # always a concrete semver rather than a constraint, which keeps it valid
+        # inside a git branch name.
         # The dependency is selected by name to be resilient to ordering changes
         # in the dependencies list.
-        VERSION=$(DEP_NAME=$DEP_NAME yq '.dependencies[] | select(.name == strenv(DEP_NAME)) | .version' "$CHART_DIR/Chart.lock")
-        if [ -z "$VERSION" ]; then
-          echo "::error::Dependency '$DEP_NAME' is not listed in $CHART_DIR/Chart.lock. Set 'primaryDependency' in helm-config.yaml to name the subchart that identifies this chart."
-          exit 1
+        if [ -f "$CHART_DIR/Chart.lock" ]; then
+          VERSION=$(DEP_NAME=$DEP_NAME yq '.dependencies[] | select(.name == strenv(DEP_NAME)) | .version' "$CHART_DIR/Chart.lock")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Dependency '$DEP_NAME' is not listed in $CHART_DIR/Chart.lock. Set 'primaryDependency' in helm-config.yaml to name the subchart that identifies this chart."
+            exit 1
+          fi
+        else
+          # A chart without dependencies has no lock file, so its own version
+          # identifies it.
+          VERSION=$(yq 'explode(.) | .version' "$CHART_DIR/Chart.yaml")
         fi
         if [ "$BUNDLE_PATCHES" = "true" ]; then
           # Replace the patch segment with "x" to bundle patch updates in one PR.
@@ -338,15 +359,6 @@ jobs:
           echo "branch-suffix=$BRANCH_SUFFIX"
           echo "version=$VERSION"
         } >> "$GITHUB_OUTPUT"
-    - name: Build Helm dependencies
-      # Installs the subchart versions pinned in Chart.lock into charts/.
-      # This must run before templating to ensure all sub-charts are present in
-      # the local cache. It fails when Chart.lock and Chart.yaml disagree, which
-      # keeps the rendered manifests a pure function of the committed sources.
-      env:
-        CHART_DIR: ${{ matrix.entry.chart }}
-      run: |
-        helm dependency build "$CHART_DIR"
     - name: Hydrate
       # Renders Kubernetes manifests for the current chart and environment using
       # `helm template`.  All rendered files are written to a temporary

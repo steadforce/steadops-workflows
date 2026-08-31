@@ -1,0 +1,9 @@
+---
+# Source: service-c/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-c-umbrella
+  namespace: service-c
+data:
+  owner: platform

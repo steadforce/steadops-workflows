@@ -1,3 +1,5 @@
 /.project
 .golden-tmp/
 tests/fixtures/**/charts/
+# This fixture stands in for a repository that git-ignores its lock file.
+tests/fixtures/monorepo/service-c/Chart.lock

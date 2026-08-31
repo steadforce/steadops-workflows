@@ -1,0 +1,8 @@
+apiVersion: v2
+name: service-c
+description: Umbrella chart that does not commit a lock file and uses a version range.
+version: 0.0.0
+dependencies:
+- name: alpha
+  version: "^1.4.0"
+  repository: file://../../upstream/alpha

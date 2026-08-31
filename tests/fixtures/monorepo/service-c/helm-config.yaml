@@ -1,0 +1,10 @@
+# This fixture deliberately has no committed Chart.lock, which is the layout of
+# a repository that git-ignores it. The workflow warns, resolves the dependency
+# at render time and reports the resolved version rather than the constraint.
+primaryDependency: alpha
+releaseName: &name service-c
+namespace: *name
+environments:
+  dev:
+    valueFiles:
+    - values-subchart-overrides.yaml
