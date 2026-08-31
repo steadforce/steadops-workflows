@@ -93,9 +93,11 @@ jobs:
           MODE="skip"
         fi
 
-        echo "base=$BASE" >> "$GITHUB_OUTPUT"
-        echo "head=$HEAD" >> "$GITHUB_OUTPUT"
-        echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+        {
+          echo "base=$BASE"
+          echo "head=$HEAD"
+          echo "mode=$MODE"
+        } >> "$GITHUB_OUTPUT"
     - name: Scan with Trufflehog
       # Scans only the resolved commit range rather than the full history.
       # This keeps scan time proportional to the size of the change, not the

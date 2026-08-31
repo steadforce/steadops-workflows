@@ -1,0 +1,36 @@
+# Lint Workflows
+#
+# Runs actionlint over every workflow in this repository.
+#
+# Purpose
+# -------
+# The workflows here are consumed by other repositories, where a broken
+# expression or a broken shell snippet only surfaces once someone else's
+# pipeline fails. actionlint checks the workflow syntax, the `${{ }}`
+# expressions, the event and matrix references and the `uses:` specifications,
+# and it runs shellcheck over every `run:` block, so those mistakes are caught
+# on the pull request that introduces them.
+
+name: Lint workflows
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+    - name: Run actionlint
+      # The container image bundles shellcheck and pyflakes, which actionlint
+      # invokes for `run:` blocks. Without them those checks are skipped.
+      uses: docker://rhysd/actionlint:1.7.12
+      with:
+        args: -color
