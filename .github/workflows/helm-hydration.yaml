@@ -52,6 +52,9 @@
 #                                        several charts are hydrated into the same
 #                                        branch, each chart owns the sub-directory
 #                                        `hydrated-manifests/<chart name>`.
+#   Artifact                           – One artifact per chart and environment
+#                                        holding the rendered manifests, when
+#                                        `upload-artifact` is enabled.
 #   Pull request                       – One PR per chart and environment targeting
 #                                        the `environments/<name>` branch, carrying
 #                                        the rendered manifests as a commit on
@@ -60,12 +63,15 @@
 name: Helm hydration
 
 # This workflow is designed to be called from another workflow via `workflow_call`.
-# It exposes four inputs:
+# It exposes six inputs:
 #   helm-version             – pin the Helm CLI version for reproducible builds.
 #   bundle-patches-in-one-pr – when "true", patch-level updates are grouped into
 #                              a single PR instead of one PR per patch release.
 #   charts-root              – where to start looking for charts.
 #   chart-discovery-depth    – how deep below charts-root to look.
+#   create-pull-request      – when false the workflow only renders, and neither
+#                              touches the environment branches nor opens a PR.
+#   upload-artifact          – publish the rendered manifests as an artifact.
 on:
   workflow_call:
     inputs:
@@ -95,6 +101,19 @@ on:
         default: 1
         description: "Maximum search depth for helm-config.yaml below charts-root."
         type: number
+      create-pull-request:
+        # When false the workflow renders the manifests and stops. Nothing is
+        # pushed and no environment branch is created, which makes the workflow
+        # usable as a pure validation step on pull requests.
+        default: true
+        description: "Push the hydrated manifests to the environment branch and open a pull request."
+        type: boolean
+      upload-artifact:
+        # Publishes the rendered manifests of each chart and environment as a
+        # workflow artifact named `hydrated-<chart>-<environment>`.
+        default: false
+        description: "Upload the hydrated manifests as a workflow artifact."
+        type: boolean
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -165,7 +184,8 @@ jobs:
   # is hydrated into it, creating it as an orphan branch on first use.
   #
   # Running this once per environment keeps the hydration jobs of several charts
-  # from racing each other to create the same branch.
+  # from racing each other to create the same branch. The job is skipped when
+  # `create-pull-request` is false, because nothing is pushed in that case.
   #
   # Matrix variable:
   #   environment – the environment name for this job instance, e.g. "dev"
@@ -174,6 +194,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
     - define-matrix
+    if: ${{ inputs.create-pull-request }}
     # Permissions required to push the initial commit of a new environment branch.
     permissions:
       contents: write
@@ -216,7 +237,8 @@ jobs:
   #   2. Resolves the chart name and the primary subchart version from Chart.lock.
   #   3. Installs the chart dependencies pinned in Chart.lock.
   #   4. Renders environment-specific Kubernetes manifests via `helm template`.
-  #   5. Moves them onto the `environments/<name>` branch.
+  #   5. Collects them under `hydrated-manifests`, on the `environments/<name>`
+  #      branch when a pull request is created.
   #   6. Opens (or updates) a pull request against the environment branch so
   #      the GitOps agent (e.g. ArgoCD) can pick up the new manifests.
   #
@@ -229,6 +251,9 @@ jobs:
     needs:
     - define-matrix
     - prepare-environment-branches
+    # prepare-environment-branches is skipped when no pull request is created,
+    # and a skipped dependency would otherwise skip this job as well.
+    if: ${{ !cancelled() && needs.define-matrix.result == 'success' && needs.prepare-environment-branches.result != 'failure' }}
     # Permissions required by the `Create pull request` step:
     #   contents: write       – push the hydrated-manifests source branch.
     #   pull-requests: write  – open / update the PR against the environment branch.
@@ -414,45 +439,62 @@ jobs:
           select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
             .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
         ' {} \;
-    - name: Stage manifests on the environment branch
-      # Moves the rendered manifests onto the environment branch and stages them
-      # so that peter-evans/create-pull-request picks them up as the commit
-      # content for the hydration PR.
-      #
+    - name: Switch to the environment branch
       # The environment branch is guaranteed to exist by the
       # prepare-environment-branches job. The actions/checkout step only fetches
       # the default branch, so an explicit fetch is required before switching.
+      if: ${{ inputs.create-pull-request }}
       env:
         BRANCH: environments/${{ matrix.entry.env }}
-        MANIFEST_DIR: ${{ steps.chart.outputs.manifest-dir }}
       run: |
         set -euo pipefail
         git fetch origin "$BRANCH"
         git switch "$BRANCH"
+    - name: Collect manifests
+      # Moves the rendered manifests from the temporary output directory into
+      # the working directory.
+      env:
+        MANIFEST_DIR: ${{ steps.chart.outputs.manifest-dir }}
+      run: |
+        set -euo pipefail
         # Remove the output of a previous run for this chart only, so that
         # sibling charts sharing the branch keep their manifests.
         rm -rf "${MANIFEST_DIR:?}"
         mkdir -p "$MANIFEST_DIR"
-        # Move all rendered manifests (root chart and sub-charts) from the
-        # temporary output directory into the working directory.
         mv -v "${RUNNER_TEMP}/hydrated-manifests"/* "$MANIFEST_DIR/"
+    - name: Stage manifests
+      # Stages the rendered manifests so that peter-evans/create-pull-request
+      # picks them up as the commit content for the hydration PR.
+      if: ${{ inputs.create-pull-request }}
+      env:
+        MANIFEST_DIR: ${{ steps.chart.outputs.manifest-dir }}
+      run: |
+        set -euo pipefail
         git add "$MANIFEST_DIR"
         # Remove untracked files left behind by helm dependency build (e.g.
         # downloaded chart archives) so the working tree is clean before the PR
         # action runs. -f (force) is required because Git refuses to remove files
         # without it, -d extends this to directories. Staged manifests are kept.
         git clean -fd -e "$MANIFEST_DIR"
-    - name: Git status
-      # Prints the current git status to the job log for debugging purposes.
-      # Useful for verifying which files were staged by `git add` and confirming
-      # that the hydrated manifests are ready to be committed.
-      run: |
+        # Prints the current git status to the job log for debugging purposes.
+        # Useful for verifying which files were staged by `git add` and confirming
+        # that the hydrated manifests are ready to be committed.
         git status
+    - name: Upload hydrated manifests
+      # Publishes the rendered manifests so that a calling workflow can inspect
+      # or compare them without going through an environment branch.
+      if: ${{ inputs.upload-artifact }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: hydrated-${{ steps.chart.outputs.name }}-${{ matrix.entry.env }}
+        path: ${{ steps.chart.outputs.manifest-dir }}/
+        if-no-files-found: error
     - name: Create pull request
       # Opens (or updates) one pull request per chart and environment with the
       # freshly rendered manifests.
       #
       # Condition:
+      #   inputs.create-pull-request – Skips this step in render-only mode.
       #   if: ${{ !env.ACT }}  – Skips this step when the workflow is executed
       #                          locally with `act` (https://github.com/nektos/act).
       #                          The `ACT` environment variable is set automatically
@@ -470,7 +512,7 @@ jobs:
       #   title   – PR title, prefixed with the 💧 emoji for immediate recognition
       #             and including the subchart version for at-a-glance traceability
       #             in the pull-request list.
-      if: ${{ !env.ACT }}
+      if: ${{ inputs.create-pull-request && !env.ACT }}
       uses: peter-evans/create-pull-request@v8.1.1
       with:
         # Only include this chart's hydrated manifests in the PR, not any other
