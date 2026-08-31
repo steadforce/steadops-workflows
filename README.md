@@ -152,12 +152,33 @@ The helm unittest workflow bundles helm unittest and helm linting.
 |---|---|---|---|
 | `helm-version` | Helm CLI version to install, e.g. `v3.19.0` | `latest` | No |
 | `helm-unittest-version` | Helm unittest plugin version, e.g. `1.0.3` | `main` (latest) | No |
+| `charts-root` | Directory the chart search starts from | `.` | No |
+| `chart-discovery-depth` | Maximum search depth for a chart's `tests/` directory below `charts-root` | `2` | No |
+| `with-subchart` | Also run the tests of charts under `charts/` | `true` | No |
 
-**Required Secrets:**
+**Secrets:**
 
 | Secret | Description | Required |
 |---|---|---|
-| `steadops-helm-renovation-ms-teams-webhook` | MS Teams webhook URL used for notifications on Renovate branches | **Yes** |
+| `steadops-helm-renovation-ms-teams-webhook` | MS Teams webhook URL used for notifications on Renovate branches. Notifications are skipped when it is not passed | No |
+
+**Which charts are tested:**
+
+Every directory holding both a `Chart.yaml` and a `tests/` directory. A chart
+without tests is skipped rather than failing, so charts can adopt tests one at a
+time. With the default inputs that is the repository root, the
+one-chart-per-repository layout; repositories holding several charts point
+`charts-root` and `chart-discovery-depth` at the directory the charts live in:
+
+```yaml
+jobs:
+  unittest:
+    uses: steadforce/steadops-workflows/.github/workflows/helm-unittest.yaml@main
+    with:
+      charts-root: .
+      chart-discovery-depth: 3
+      with-subchart: false
+```
 
 **Usage example:**
 ```yaml
@@ -174,11 +195,12 @@ jobs:
 ```
 
 **How it works:**
-1. Installs the requested Helm version and the `helm-unittest` plugin.
-2. Runs `helm dependency update` to resolve chart dependencies.
-3. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
-4. Runs `helm lint` to validate the chart.
-5. On Renovate branches (refs containing `renovate/`), sends a success or failure notification to MS Teams.
+1. Finds every chart with a `tests/` directory and builds a job matrix from them.
+2. Installs the requested Helm version and the `helm-unittest` plugin.
+3. Runs `helm dependency update` to resolve chart dependencies.
+4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
+5. Runs `helm lint` to validate the chart.
+6. On Renovate branches (refs containing `renovate/`), sends a success or failure notification to MS Teams, if the webhook secret was passed.
 
 ---
 

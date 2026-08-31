@@ -18,16 +18,25 @@
 #   helm-unittest-version – Version of the helm-unittest plugin to install
 #                           (e.g. "1.0.3"). Defaults to "main" (latest).
 #                           Pinning is recommended for reproducible builds.
+#   charts-root           – Where to start looking for charts. Defaults to the
+#                           repository root.
+#   chart-discovery-depth – How deep below charts-root to look.
+#   with-subchart         – Whether to also run the tests of charts under
+#                           charts/. Defaults to true.
 #
 # Secrets
 # -------
 #   steadops-helm-renovation-ms-teams-webhook – MS Teams incoming webhook URL.
-#     Notifications are only sent on branches matching `renovate/` so the
-#     secret must be present in the calling repository even if notifications
-#     are not needed for manual PRs.
+#     Optional. Notifications are only sent on branches matching `renovate/`,
+#     and are skipped entirely when the secret is not passed.
 #
 # Expected repository layout
 # --------------------------
+# Every directory holding both a Chart.yaml and a tests/ directory is tested.
+# With the default inputs that is the repository root, which is the
+# one-chart-per-repository layout. Repositories holding several charts point
+# charts-root and chart-discovery-depth at the directory the charts live in.
+#
 #   Chart.yaml        – Required by `helm dependency update` and `helm lint`.
 #   tests/            – Directory containing helm-unittest test files
 #                       (*.yaml with `suite:` key). Required by `helm unittest`.
@@ -45,13 +54,66 @@ on:
         default: "main"
         description: "Helm unittest plugin version eg 1.0.3, defaults to main (latest version)."
         type: string
+      charts-root:
+        default: "."
+        description: "Directory to search for charts, defaults to the repository root."
+        type: string
+      chart-discovery-depth:
+        default: 2
+        description: "Maximum search depth for a chart's tests directory below charts-root."
+        type: number
+      with-subchart:
+        default: true
+        description: "Also run the tests of charts under charts/."
+        type: boolean
     secrets:
       steadops-helm-renovation-ms-teams-webhook:
-        required: true
+        required: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Job: define-matrix
+  # Finds every chart that has tests. A chart without a tests directory is
+  # skipped rather than failing, so charts can adopt tests one at a time.
+  # ---------------------------------------------------------------------------
+  define-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      charts: ${{ steps.define.outputs.charts }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Discover charts with tests
+      id: define
+      env:
+        CHARTS_ROOT: ${{ inputs.charts-root }}
+        DISCOVERY_DEPTH: ${{ inputs.chart-discovery-depth }}
+      run: |
+        set -euo pipefail
+        charts=$(find "$CHARTS_ROOT" -maxdepth "$DISCOVERY_DEPTH" -type d -name tests -print0 \
+          | while IFS= read -r -d '' dir; do
+              chart="$(dirname "$dir")"
+              if [ -f "$chart/Chart.yaml" ]; then
+                printf '%s\n' "$chart"
+              fi
+            done | sort -u | jq -Rsc 'split("\n") | map(select(length > 0))')
+        if [ "$charts" = "[]" ]; then
+          echo "::error::No directory below '$CHARTS_ROOT' holds both a Chart.yaml and a tests directory."
+          exit 1
+        fi
+        echo "charts=$charts" >> "$GITHUB_OUTPUT"
+
   unittest:
     runs-on: ubuntu-latest
+    needs:
+    - define-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        chart: ${{ fromJSON(needs.define-matrix.outputs.charts) }}
+    env:
+      # Mapped here so a step condition can tell whether the secret was passed;
+      # the secrets context is not available in an `if` expression.
+      MS_TEAMS_WEBHOOK: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
     steps:
     - uses: actions/checkout@v6
     - name: Set up Helm
@@ -89,13 +151,20 @@ jobs:
       # Downloads all chart dependencies declared in Chart.yaml into charts/.
       # Must run before templating or testing to ensure all sub-charts are
       # present locally.
-      run: helm dependency update
+      env:
+        CHART_DIR: ${{ matrix.chart }}
+      run: helm dependency update "$CHART_DIR"
     - name: Run Helm unittests
       # Runs all helm-unittest test suites found in the chart.
       # -t JUnit  outputs results in JUnit XML format so they can be picked up
       #           by the Publish Test Results step below.
       # -o        writes the XML report to test-output.xml in the workspace.
-      run: helm unittest -t JUnit -o test-output.xml .
+      env:
+        CHART_DIR: ${{ matrix.chart }}
+        WITH_SUBCHART: ${{ inputs.with-subchart }}
+      run: |
+        helm unittest --with-subchart="$WITH_SUBCHART" \
+          -t JUnit -o test-output.xml "$CHART_DIR"
     - name: Publish Test Results
       # Parses the JUnit XML report and publishes a test result summary to the
       # GitHub Actions UI (check run annotations and job summary).
@@ -111,12 +180,14 @@ jobs:
     - name: Lint Helm chart
       # Runs `helm lint` to validate chart structure, required fields, and
       # template syntax. Fails the job if any linting errors are found.
-      run: helm lint .
+      env:
+        CHART_DIR: ${{ matrix.chart }}
+      run: helm lint "$CHART_DIR"
     - name: Helm validation and helm unittests succeeded
       # Sends a success notification to MS Teams on Renovate branches so the
       # team can quickly approve automated dependency-update PRs with confidence.
       # Only runs on branches matching `renovate/` and not when using `act`.
-      if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT }}
+      if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
       uses: jdcargile/ms-teams-notification@v1.4
       with:
         github-token: ${{ github.token }}
@@ -129,7 +200,7 @@ jobs:
       # team is immediately alerted that an automated dependency update broke
       # the chart and the PR should not be merged.
       # Only runs on branches matching `renovate/` and not when using `act`.
-      if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT }}
+      if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
       uses: jdcargile/ms-teams-notification@v1.4
       with:
         github-token: ${{ github.token }}
