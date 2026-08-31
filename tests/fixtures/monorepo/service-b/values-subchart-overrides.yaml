@@ -1,0 +1,4 @@
+alpha:
+  replicaCount: 3
+gateway:
+  host: service-b.example.com

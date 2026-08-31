@@ -1,1 +1,3 @@
 /.project
+.golden-tmp/
+tests/fixtures/**/charts/

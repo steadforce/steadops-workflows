@@ -1,0 +1,15 @@
+# Configuration file used by the pipeline hydration step
+# to render the manifests for the different environments.
+releaseName: &name alpha
+namespace: *name
+environments:
+  dev:
+    apis:
+    - monitoring.coreos.com/v1/ServiceMonitor
+    valueFiles:
+    - values-subchart-overrides.yaml
+    - values-dev.yaml
+  prod:
+    # No apis: the environment renders without the monitoring API group.
+    valueFiles:
+    - values-subchart-overrides.yaml

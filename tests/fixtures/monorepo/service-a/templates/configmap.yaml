@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-a-umbrella
+  namespace: {{ .Release.Namespace }}
+data:
+  owner: platform

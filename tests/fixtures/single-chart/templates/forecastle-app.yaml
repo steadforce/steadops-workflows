@@ -1,0 +1,10 @@
+{{- /* A resource owned by the umbrella chart rather than the upstream chart. */}}
+apiVersion: forecastle.stakater.com/v1alpha1
+kind: ForecastleApp
+metadata:
+  name: alpha
+  namespace: {{ .Release.Namespace }}
+spec:
+  name: Alpha
+  group: Applications
+  url: https://alpha.example.com

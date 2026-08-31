@@ -1,0 +1,9 @@
+---
+# Source: service-b/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-b-umbrella
+  namespace: service-b
+data:
+  owner: platform

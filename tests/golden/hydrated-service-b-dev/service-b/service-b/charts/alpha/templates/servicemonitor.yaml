@@ -1,0 +1,14 @@
+---
+# Source: service-b/charts/alpha/templates/servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: service-b-alpha
+  namespace: service-b
+spec:
+  endpoints:
+    - interval: 30s
+      port: metrics
+  selector:
+    matchLabels:
+      app: service-b-alpha

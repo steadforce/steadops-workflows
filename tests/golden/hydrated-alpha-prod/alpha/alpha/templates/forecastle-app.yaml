@@ -1,0 +1,11 @@
+---
+# Source: alpha/templates/forecastle-app.yaml
+apiVersion: forecastle.stakater.com/v1alpha1
+kind: ForecastleApp
+metadata:
+  name: alpha
+  namespace: alpha
+spec:
+  name: Alpha
+  group: Applications
+  url: https://alpha.example.com

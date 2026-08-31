@@ -1,0 +1,14 @@
+---
+# Source: alpha/charts/alpha/templates/servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: alpha-alpha
+  namespace: alpha
+spec:
+  endpoints:
+    - interval: 15s
+      port: metrics
+  selector:
+    matchLabels:
+      app: alpha-alpha

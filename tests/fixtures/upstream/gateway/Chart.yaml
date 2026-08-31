@@ -1,0 +1,4 @@
+apiVersion: v2
+name: gateway
+description: Stub upstream chart. Stands in for a real dependency in the workflow tests.
+version: 2.1.0

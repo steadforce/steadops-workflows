@@ -1,0 +1,8 @@
+apiVersion: v2
+name: service-a
+description: Umbrella chart whose upstream chart is named differently.
+version: 0.0.0
+dependencies:
+- name: gateway
+  version: 2.1.0
+  repository: file://../../upstream/gateway

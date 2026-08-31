@@ -1,0 +1,4 @@
+replicaCount: 1
+image: registry.example.com/alpha:1.4.2
+monitoring:
+  interval: 30s
