@@ -27,14 +27,18 @@
 #                         • A top-level `releaseName` (string, required)
 #                         • A top-level `namespace`   (string, required)
 #                         • Per-environment `apis` and `valueFiles` lists
+#                         • An optional `primaryDependency` naming the subchart
+#                           whose version identifies the chart
+#   Chart.lock        – Must be committed. It pins the subchart versions that
+#                       are installed and rendered.
 #
 # Output
 # ------
 #   define-matrix.outputs.hydrations        – JSON array of environment names,
 #                                             e.g. ["dev","prod"].
 #                                             Consumed downstream via fromJSON().
-#   get-subchart-version.outputs.version    – The primary subchart version read
-#                                             from Chart.yaml, e.g. "43.54.0".
+#   get-subchart-version.outputs.version    – The resolved primary subchart version
+#                                             read from Chart.lock, e.g. "43.54.0".
 #   hydrated-manifests/                     – Directory tree written by helm template,
 #                                             one sub-folder per chart component.
 #   Pull request                            – One PR per environment targeting the
@@ -94,18 +98,19 @@ jobs:
         echo "hydrations=$(yq '.environments | keys | to_json(0)' helm-config.yaml)" >> "$GITHUB_OUTPUT"
   # ---------------------------------------------------------------------------
   # Job: get-subchart-version
-  # Reads the primary subchart version from Chart.yaml and exposes it as a job
-  # output so that downstream jobs can embed it in branch names and PR titles.
+  # Reads the resolved primary subchart version from Chart.lock and exposes it as
+  # a job output so that downstream jobs can embed it in branch names and PR titles.
   #
-  # This makes every hydration PR unambiguously traceable to the chart version
-  # that produced it, and prevents branch name collisions across versions.
+  # Chart.lock holds the version that `helm dependency build` actually installs,
+  # so the reported version always matches the rendered manifests. It is also
+  # always a concrete semver, which keeps it valid inside a git branch name.
   #
   # Example output:  version=43.54.0
   # ---------------------------------------------------------------------------
   get-subchart-version:
     runs-on: ubuntu-latest
     outputs:
-      # The primary subchart version string, e.g. "43.54.0"
+      # The resolved primary subchart version string, e.g. "43.54.0"
       version: ${{ steps.get-subchart-version.outputs.version }}
     steps:
     - name: Checkout repository
@@ -113,16 +118,28 @@ jobs:
     - name: Get subchart version
       id: get-subchart-version
       run: |
-        # Read the chart name from Chart.yaml to identify the primary dependency.
-        # explode(.) is not needed here because .name is a plain scalar with no anchors.
-        CHART_NAME=$(yq '.name' Chart.yaml)
-        # explode(.) resolves YAML anchors and aliases before querying.
-        # Chart.yaml uses anchors (e.g. `version: &version 43.54.0`) to keep
-        # the chart version and dependency version in sync; without explode(.)
-        # yq would return the raw alias token instead of the actual value.
+        # The primary dependency is the subchart whose version identifies this
+        # chart. It defaults to the dependency sharing the chart's own name, which
+        # covers umbrella charts wrapping a single upstream chart of the same name.
+        # Charts wrapping a differently named upstream chart declare it explicitly
+        # via `primaryDependency` in helm-config.yaml.
+        # explode(.) resolves YAML anchors and aliases before querying, because
+        # helm-config.yaml and Chart.yaml use anchors to avoid repetition.
+        DEP_NAME=$(yq 'explode(.) | .primaryDependency // ""' helm-config.yaml)
+        if [ -z "$DEP_NAME" ]; then
+          DEP_NAME=$(yq 'explode(.) | .name' Chart.yaml)
+        fi
+        if [ ! -f Chart.lock ]; then
+          echo "::error::Chart.lock is missing. Run 'helm dependency update' locally and commit the lock file."
+          exit 1
+        fi
         # The dependency is selected by name to be resilient to ordering changes
         # in the dependencies list.
-        DEPENDENCY_VERSION=$(DEP_NAME=$CHART_NAME yq 'explode(.) | .dependencies[] | select(.name == strenv(DEP_NAME)).version' Chart.yaml)
+        DEPENDENCY_VERSION=$(DEP_NAME=$DEP_NAME yq '.dependencies[] | select(.name == strenv(DEP_NAME)) | .version' Chart.lock)
+        if [ -z "$DEPENDENCY_VERSION" ]; then
+          echo "::error::Dependency '$DEP_NAME' is not listed in Chart.lock. Set 'primaryDependency' in helm-config.yaml to name the subchart that identifies this chart."
+          exit 1
+        fi
         if [ "${{ inputs.bundle-patches-in-one-pr }}" = "true" ]; then
           # Replace the patch segment with "x" to bundle patch updates in one PR.
           DEPENDENCY_VERSION=$(echo "$DEPENDENCY_VERSION" | cut -d. -f1,2).x
@@ -134,7 +151,7 @@ jobs:
   # Runs once per environment defined in the matrix produced by `define-matrix`.
   # Each parallel job:
   #   1. Installs the requested Helm version.
-  #   2. Resolves all chart dependencies declared in Chart.yaml.
+  #   2. Installs the chart dependencies pinned in Chart.lock.
   #   3. Renders environment-specific Kubernetes manifests via `helm template`.
   #   4. Ensures the target `environments/<name>` branch exists on origin,
   #      creating it as an orphan branch if it does not yet exist.
@@ -175,12 +192,13 @@ jobs:
       # setup step succeeded and making the exact version traceable in CI output.
       run: |
         helm version
-    - name: Update Helm dependencies
-      # Downloads all chart dependencies declared in Chart.yaml into charts/.
-      # This must run before templating or packaging to ensure all sub-charts
-      # are present in the local cache.
+    - name: Build Helm dependencies
+      # Installs the subchart versions pinned in Chart.lock into charts/.
+      # This must run before templating to ensure all sub-charts are present in
+      # the local cache. It fails when Chart.lock and Chart.yaml disagree, which
+      # keeps the rendered manifests a pure function of the committed sources.
       run: |
-        helm dependency update
+        helm dependency build
     - name: Hydrate
       # Renders Kubernetes manifests for the current environment using
       # `helm template`.  All rendered files are written to a temporary
