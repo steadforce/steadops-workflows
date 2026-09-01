@@ -100,7 +100,15 @@ apps/
 permissions:
   contents: write
   pull-requests: write
+  issues: write        # optional, see below
 ```
+
+`issues: write` is only needed to give the per-environment label a fixed colour.
+Labels belong to the issues API even when they are only ever used on pull
+requests, and the permissions of a reusable workflow are capped by those of its
+caller, so the workflow cannot grant it to itself. Without it the run still
+succeeds: the label is applied to the pull request either way, GitHub just
+picks a random colour for it the first time it appears.
 
 **Usage example:**
 ```yaml
@@ -114,6 +122,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   hydration:
@@ -132,10 +141,27 @@ jobs:
 
 **How it works:**
 1. Searches `charts-root` for `helm-config.yaml` files and builds a parallel job matrix — one job per chart and environment.
-2. Creates the `environments/<name>` branch on origin once per environment if it does not exist yet, as an orphan branch.
+2. Creates the `environments/<name>` branch on origin once per environment if it does not exist yet, as an orphan branch, and creates the `env: <name>` label if it does not exist yet.
 3. For each chart and environment: installs Helm, reads the chart name and the resolved primary subchart version from `Chart.lock`, installs the dependencies pinned in `Chart.lock`, runs `helm template` with the environment-specific value files and API groups, and post-processes CRD manifests to inject ArgoCD `ServerSideApply=true` and sync-wave `-1` annotations. If `bundle-patches-in-one-pr` is `true`, the patch segment of the version is replaced with `x`.
 4. Moves the manifests onto the environment branch, replacing only the output of the chart being hydrated.
-5. Opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into `environments/<env>`.
+5. Opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`.
+
+**Environment label colours:**
+
+The `env: <name>` label is coloured by name, so that the environment a pull
+request targets is readable from the list without opening it. The title keeps
+its `[<env>]` prefix as well.
+
+| Environment name | Colour |
+|---|---|
+| `prod`, `production`, `live` | red |
+| `stage`, `staging`, `preprod`, `pre-prod`, `uat` | orange |
+| `dev`, `develop`, `development` | green |
+| `test`, `testing`, `qa` | blue |
+| anything else | picked from a fixed palette by a hash of the name, so it is stable across runs and repositories |
+
+An existing label is never recoloured, so a repository that changed one on
+purpose keeps its choice.
 
 With `create-pull-request: false` the workflow stops after step 3 and neither
 creates a branch nor opens a pull request, which makes it usable as a

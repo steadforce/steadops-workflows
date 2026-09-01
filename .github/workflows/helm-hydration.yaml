@@ -196,9 +196,17 @@ jobs:
     needs:
     - define-matrix
     if: ${{ inputs.create-pull-request }}
-    # Permissions required to push the initial commit of a new environment branch.
+    # Permissions required by this job:
+    #   contents: write  – push the initial commit of a new environment branch.
+    #   issues: write    – create the per-environment label with a fixed colour.
+    #                      Labels are part of the issues API even when they are
+    #                      only ever used on pull requests. A caller that does not
+    #                      grant this still works: the label is applied by the
+    #                      pull request step either way, GitHub just picks a
+    #                      random colour for it the first time.
     permissions:
       contents: write
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -229,6 +237,51 @@ jobs:
         git switch --orphan "$BRANCH"
         git commit --allow-empty -m "chore: initialise $BRANCH branch"
         git push origin "$BRANCH"
+    - name: Ensure environment label exists
+      # Gives the "env: <name>" label a colour before any pull request carries
+      # it. Without this GitHub creates the label implicitly, the first time it
+      # is applied, in a random colour — which defeats the point of colouring
+      # the environment in the first place.
+      #
+      # The colour is semantic where the environment name is one of the usual
+      # ones, so that production reads as red and development as green at a
+      # glance, and deterministic otherwise, so that an unrecognised environment
+      # still gets one colour and keeps it.
+      #
+      # An existing label is left alone. A repository that recoloured it on
+      # purpose should not have that reverted on the next hydration run.
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ENVIRONMENT: ${{ matrix.environment }}
+      run: |
+        set -euo pipefail
+        label="env: $ENVIRONMENT"
+        case "$(printf '%s' "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]')" in
+          prod|production|live)                 colour=b60205 ;;  # red
+          stage|staging|preprod|pre-prod|uat)   colour=d93f0b ;;  # orange
+          dev|develop|development)              colour=0e8a16 ;;  # green
+          test|testing|qa)                      colour=1d76db ;;  # blue
+          *)
+            # Index a fixed palette by a hash of the name, so the same
+            # environment gets the same colour on every run and in every
+            # repository, without this workflow having to know the name.
+            palette=(0052cc 006b75 5319e7 e99695 fbca04 bfd4f2)
+            digest=$(printf '%s' "$ENVIRONMENT" | sha256sum | cut -c1-4)
+            colour=${palette[$(( 0x$digest % ${#palette[@]} ))]}
+            ;;
+        esac
+
+        if error=$(gh label create "$label" \
+              --color "$colour" \
+              --description "Hydrated manifests for the $ENVIRONMENT environment" 2>&1); then
+          echo "Created label '$label' in #$colour."
+        elif printf '%s' "$error" | grep -q "already exists"; then
+          echo "Label '$label' already exists, leaving its colour alone."
+        else
+          # Most likely the calling workflow does not grant issues: write. The
+          # label is still applied to the pull request, so this is not fatal.
+          echo "::warning::could not create the label '$label': $error"
+        fi
 
   # ---------------------------------------------------------------------------
   # Job: hydrate-chart
@@ -531,7 +584,10 @@ jobs:
       #             charts, and the subchart version so that each chart version
       #             gets its own branch and open PRs from different versions
       #             coexist.
-      #   labels  – Labels applied to the PR for filtering and automation rules.
+      #   labels  – Labels applied to the PR for filtering and automation rules,
+      #             including "env: <name>" so the environment is visible in the
+      #             pull request list without reading the title. Its colour is
+      #             set once per environment by prepare-environment-branches.
       #   title   – PR title, prefixed with the 💧 emoji for immediate recognition
       #             and including the subchart version for at-a-glance traceability
       #             in the pull-request list.
@@ -551,4 +607,5 @@ jobs:
         labels: |
           hydration
           automated pr
+          env: ${{ matrix.entry.env }}
         title: 💧 [${{ matrix.entry.env }}] Hydrated manifests for ${{ steps.chart.outputs.name }} subchart version ${{ steps.chart.outputs.version }}
