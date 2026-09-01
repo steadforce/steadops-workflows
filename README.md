@@ -148,17 +148,43 @@ jobs:
 
 **Environment label colours:**
 
-The `env: <name>` label is coloured by name, so that the environment a pull
-request targets is readable from the list without opening it. The title keeps
-its `[<env>]` prefix as well.
+The `env: <name>` label is coloured so that the tier a pull request targets is
+readable from the list without opening it. The title keeps its `[<env>]` prefix
+as well.
 
-| Environment name | Colour |
+The tier chooses the colour family:
+
+| Segment in the environment name | Family |
 |---|---|
-| `prod`, `production`, `live` | red |
-| `stage`, `staging`, `preprod`, `pre-prod`, `uat` | orange |
-| `dev`, `develop`, `development` | green |
-| `test`, `testing`, `qa` | blue |
-| anything else | picked from a fixed palette by a hash of the name, so it is stable across runs and repositories |
+| `prod`, `prod<n>`, `production`, `live`, `prd` | red |
+| `stage`, `staging`, `stg`, `preprod`, `uat` | orange |
+| `test`, `test<n>`, `testing`, `qa`, `int` | blue |
+| `dev`, `dev<n>`, `develop`, `development` | green |
+| `local`, `localhost`, `sandbox`, `demo`, `kind`, `minikube` | grey |
+| none of the above | purple, teal and friends |
+
+The tier is read from the name's **segments**, not from the whole name, because
+an environment is commonly named after its cluster with the tier as one part of
+it: `sf-k8s01-prod` is production and `sf-k8s02-dev` is not. Matching on
+segments also keeps `sf-devops` out of the development family, which a plain
+substring match would not. Where a name contains more than one tier the most
+severe wins, so nothing that mentions production is coloured as though it were
+not.
+
+Within the family the shade comes from the number in the name, so sibling
+clusters get consecutive shades and cannot collide:
+
+| Environment | Colour |
+|---|---|
+| `sf-k8s01-dev` | green `#3fb950` |
+| `sf-k8s02-dev` | green `#116329` |
+| `sf-k8s03-dev` | green `#57ab5a` |
+| `sf-k8s04-dev` | green `#0e8a16` |
+| `sf-k8s01-prod` | red `#a40e26` |
+| `local` | grey `#8c959f` |
+
+A name with no number falls back to a hash of the name. Either way the colour is
+stable for a given name across every run and every repository.
 
 An existing label is never recoloured, so a repository that changed one on
 purpose keeps its choice.

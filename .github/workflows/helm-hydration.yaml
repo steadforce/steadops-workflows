@@ -243,10 +243,19 @@ jobs:
       # is applied, in a random colour — which defeats the point of colouring
       # the environment in the first place.
       #
-      # The colour is semantic where the environment name is one of the usual
-      # ones, so that production reads as red and development as green at a
-      # glance, and deterministic otherwise, so that an unrecognised environment
-      # still gets one colour and keeps it.
+      # The tier chooses the colour family and a hash of the full name chooses
+      # the shade within it, so that "is this production" is answerable from the
+      # colour alone while sibling clusters of the same tier stay apart.
+      #
+      # The tier is read from the name's segments rather than from the whole
+      # name, because an environment is commonly named after its cluster with
+      # the tier as one part of it — sf-k8s01-prod is a production environment
+      # and sf-k8s02-dev is not, and matching the whole name recognises neither.
+      # Segments also stop "sf-devops" from being read as a development tier,
+      # which a plain substring match would.
+      #
+      # Where several tiers appear in one name the most severe wins, so nothing
+      # that mentions production is coloured as though it were not.
       #
       # An existing label is left alone. A repository that recoloured it on
       # purpose should not have that reverted on the next hydration run.
@@ -256,20 +265,47 @@ jobs:
       run: |
         set -euo pipefail
         label="env: $ENVIRONMENT"
-        case "$(printf '%s' "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]')" in
-          prod|production|live)                 colour=b60205 ;;  # red
-          stage|staging|preprod|pre-prod|uat)   colour=d93f0b ;;  # orange
-          dev|develop|development)              colour=0e8a16 ;;  # green
-          test|testing|qa)                      colour=1d76db ;;  # blue
-          *)
-            # Index a fixed palette by a hash of the name, so the same
-            # environment gets the same colour on every run and in every
-            # repository, without this workflow having to know the name.
-            palette=(0052cc 006b75 5319e7 e99695 fbca04 bfd4f2)
-            digest=$(printf '%s' "$ENVIRONMENT" | sha256sum | cut -c1-4)
-            colour=${palette[$(( 0x$digest % ${#palette[@]} ))]}
-            ;;
+
+        # tr -cs collapses every run of non-alphanumeric characters into one
+        # space, so sf-k8s01-prod becomes the segments "sf k8s01 prod".
+        segments=$(printf '%s' "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ')
+        rank=0
+        for segment in $segments; do
+          case "$segment" in
+            prod|prod[0-9]*|production|live|prd)  if [ "$rank" -lt 5 ]; then rank=5; fi ;;
+            stage|staging|stg|preprod|uat)        if [ "$rank" -lt 4 ]; then rank=4; fi ;;
+            test|test[0-9]*|testing|qa|int)       if [ "$rank" -lt 3 ]; then rank=3; fi ;;
+            dev|dev[0-9]*|develop|development)    if [ "$rank" -lt 2 ]; then rank=2; fi ;;
+            local|localhost|sandbox|demo|kind|minikube)
+                                                  if [ "$rank" -lt 1 ]; then rank=1; fi ;;
+          esac
+        done
+
+        case "$rank" in
+          5) family=(b60205 d73a4a cf222e a40e26 e5534b 8e1519) ;;  # production, red
+          4) family=(d93f0b e36209 bf5b04 c2410c ea7317 fb8500) ;;  # staging, orange
+          3) family=(1d76db 0052cc 218bff 0366d6 0a3069 4184e4) ;;  # test, blue
+          2) family=(0e8a16 2ea043 1a7f37 3fb950 116329 57ab5a) ;;  # development, green
+          1) family=(6e7781 57606a 424a53 8c959f 795548 4d5358) ;;  # throwaway, grey
+          *) family=(5319e7 006b75 8250df bf3989 9a6700 1b7c83) ;;  # unrecognised
         esac
+
+        # Sibling environments of one tier usually differ only by a number, so
+        # the number picks the shade where there is one: consecutive clusters
+        # then get consecutive shades and cannot collide, which a hash of names
+        # differing in one character regularly does. 10# forces base ten, or a
+        # zero padded 08 would be read as an invalid octal literal. Only the last
+        # six digits are used, so a name carrying a date cannot overflow.
+        #
+        # Names with no number fall back to a hash of the name, which is stable
+        # for a given name across every run and every repository.
+        digits=$(printf '%s' "$ENVIRONMENT" | tr -cd '0-9' | tail -c 6)
+        if [ -n "$digits" ]; then
+          index=$(( 10#$digits % ${#family[@]} ))
+        else
+          index=$(( 0x$(printf '%s' "$ENVIRONMENT" | sha256sum | cut -c1-4) % ${#family[@]} ))
+        fi
+        colour=${family[$index]}
 
         if error=$(gh label create "$label" \
               --color "$colour" \
