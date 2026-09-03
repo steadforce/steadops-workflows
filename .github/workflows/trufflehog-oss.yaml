@@ -113,7 +113,7 @@ jobs:
       id: trufflehog_scan
       if: ${{ steps.refs.outputs.mode == 'range' }}
       continue-on-error: true
-      uses: trufflesecurity/trufflehog@v3.95.3
+      uses: trufflesecurity/trufflehog@v3.97.4
       with:
         path: ./
         base: ${{ steps.refs.outputs.base }}
