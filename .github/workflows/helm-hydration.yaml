@@ -137,7 +137,7 @@ jobs:
       multi-chart: ${{ steps.define.outputs.multi-chart }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
     - name: Discover charts and environments
       id: define
       env:
@@ -213,7 +213,7 @@ jobs:
         environment: ${{ fromJSON(needs.define-matrix.outputs.environments) }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
     - name: Ensure environment branch exists
       env:
         BRANCH: environments/${{ matrix.environment }}
@@ -358,7 +358,7 @@ jobs:
         entry: ${{ fromJSON(needs.define-matrix.outputs.matrix) }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
     - name: Set up Helm
       # Installs the Helm CLI at the version requested via the workflow input.
       # Pinning to a specific version (e.g. "v3.17.0") ensures reproducible builds.

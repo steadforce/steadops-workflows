@@ -45,7 +45,7 @@ jobs:
       # fetch-depth: 0 checks out the full git history so that Gitleaks can
       # scan all commits, not just the latest snapshot. Without this, secrets
       # introduced in earlier commits would go undetected.
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Allow git workspace for container action

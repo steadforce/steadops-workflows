@@ -45,7 +45,7 @@ jobs:
       # SHA resolved in the next step is guaranteed to be present locally.
       # Without this, `git cat-file` and `git rev-parse` may fail to find
       # commits that are not in the shallow clone.
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Resolve commit range
