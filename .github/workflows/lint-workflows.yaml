@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
     - name: Run actionlint
       # The container image bundles shellcheck and pyflakes, which actionlint
       # invokes for `run:` blocks. Without them those checks are skipped.
