@@ -1,0 +1,6 @@
+dependencies:
+- name: gateway
+  repository: file://../../upstream/gateway
+  version: 2.1.0
+digest: sha256:7d0b5325860a49f13bb294df196052b65b03870edba3d1a30e60dc092c4bbe07
+generated: "2026-08-31T14:31:14.386309449+02:00"

@@ -1,0 +1,4 @@
+apiVersion: v2
+name: alpha
+description: Stub upstream chart. Stands in for a real dependency in the workflow tests.
+version: 1.4.2

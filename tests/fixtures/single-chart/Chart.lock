@@ -1,0 +1,6 @@
+dependencies:
+- name: alpha
+  repository: file://../upstream/alpha
+  version: 1.4.2
+digest: sha256:5dc40d3cf279bb359e0b37bd90c20f9d2278901e64b98bf9b6fffa9b19c87224
+generated: "2026-08-31T14:31:12.483669398+02:00"

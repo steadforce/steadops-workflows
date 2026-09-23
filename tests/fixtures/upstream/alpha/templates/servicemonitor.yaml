@@ -1,0 +1,16 @@
+{{- /* Rendered only when the environment declares the monitoring API group,
+       which exercises the `apis` list from helm-config.yaml. */}}
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor" }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-alpha
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpoints:
+  - interval: {{ .Values.monitoring.interval }}
+    port: metrics
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-alpha
+{{- end }}

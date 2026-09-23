@@ -1,0 +1,4 @@
+alpha:
+  replicaCount: 2
+  monitoring:
+    interval: 15s

@@ -1,0 +1,99 @@
+# Test Helm Hydration
+#
+# Renders the fixture charts under tests/fixtures with the hydration workflow of
+# this repository and compares the result against the manifests committed under
+# tests/golden.
+#
+# Purpose
+# -------
+# The hydration workflow is consumed by other repositories, so a change to it
+# has to be validated before it reaches main. This workflow calls it through
+# `uses: ./.github/workflows/helm-hydration.yaml`, which resolves to the version
+# on the pull request, and therefore exercises the change itself: the chart
+# discovery, the matrix fan-out, the value file and API group handling, the CRD
+# annotation post-processing and the manifest layout.
+#
+# It runs the hydration workflow in render-only mode, so no environment branch
+# is created and no pull request is opened.
+#
+# Fixtures
+# --------
+#   tests/fixtures/single-chart – one chart at the root of a "charts-root",
+#                                 the one-chart-per-repository layout.
+#   tests/fixtures/monorepo     – two charts below a shared root.
+#   tests/fixtures/upstream     – stub charts the fixtures depend on via file://,
+#                                 which keeps the tests independent of any chart
+#                                 repository.
+#
+# Updating the golden manifests
+# -----------------------------
+# Run tests/regenerate-golden.sh and commit the diff. The goldens depend on the
+# Helm version, so the version pinned below and the one in that script must match.
+
+name: Test helm hydration
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+# The called workflow declares these permissions on its jobs. A calling workflow
+# can only narrow them, so they are declared here as well even though nothing is
+# written in render-only mode.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Renders the single-chart fixture with the default discovery settings.
+  # ---------------------------------------------------------------------------
+  hydrate-single-chart:
+    uses: ./.github/workflows/helm-hydration.yaml
+    with:
+      helm-version: v3.19.0
+      charts-root: tests/fixtures/single-chart
+      chart-discovery-depth: 1
+      create-pull-request: false
+      upload-artifact: true
+
+  # ---------------------------------------------------------------------------
+  # Renders the two-chart fixture, which exercises the per-chart manifest
+  # directory and the shared environment set.
+  # ---------------------------------------------------------------------------
+  hydrate-monorepo:
+    uses: ./.github/workflows/helm-hydration.yaml
+    with:
+      helm-version: v3.19.0
+      charts-root: tests/fixtures/monorepo
+      chart-discovery-depth: 2
+      create-pull-request: false
+      upload-artifact: true
+
+  # ---------------------------------------------------------------------------
+  # Downloads every artifact produced above and compares the whole tree against
+  # the committed goldens. `diff -r` also reports artifacts that are missing or
+  # unexpected, so a chart or environment dropping out of the matrix fails here.
+  # ---------------------------------------------------------------------------
+  compare-with-golden:
+    runs-on: ubuntu-latest
+    needs:
+    - hydrate-single-chart
+    - hydrate-monorepo
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+    - name: Download hydrated manifests
+      uses: actions/download-artifact@v4
+      with:
+        path: actual
+    - name: Compare against golden manifests
+      run: |
+        if ! diff -ru tests/golden actual; then
+          echo "::error::The rendered manifests differ from tests/golden. If the change is intended, run tests/regenerate-golden.sh and commit the result."
+          exit 1
+        fi
+        echo "Rendered manifests match tests/golden."

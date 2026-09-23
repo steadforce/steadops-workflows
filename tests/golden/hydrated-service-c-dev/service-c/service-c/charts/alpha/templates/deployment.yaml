@@ -1,0 +1,20 @@
+---
+# Source: service-c/charts/alpha/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-c-alpha
+  namespace: service-c
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-c-alpha
+  template:
+    metadata:
+      labels:
+        app: service-c-alpha
+    spec:
+      containers:
+        - name: alpha
+          image: registry.example.com/alpha:1.4.2

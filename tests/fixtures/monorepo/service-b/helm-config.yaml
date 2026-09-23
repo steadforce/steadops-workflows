@@ -1,0 +1,9 @@
+primaryDependency: alpha
+releaseName: &name service-b
+namespace: *name
+environments:
+  dev:
+    apis:
+    - monitoring.coreos.com/v1/ServiceMonitor
+    valueFiles:
+    - values-subchart-overrides.yaml

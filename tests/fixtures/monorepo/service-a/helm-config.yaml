@@ -1,0 +1,12 @@
+# The chart name and the upstream chart name differ, so the subchart carrying
+# the version that identifies this chart is named explicitly.
+primaryDependency: gateway
+releaseName: &name service-a
+namespace: *name
+environments:
+  dev: &environment
+    apis: &apis
+    - monitoring.coreos.com/v1/ServiceMonitor
+    valueFiles:
+    - values-subchart-overrides.yaml
+  prod: *environment

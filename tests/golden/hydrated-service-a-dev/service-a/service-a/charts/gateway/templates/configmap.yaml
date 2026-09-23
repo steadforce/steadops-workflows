@@ -1,0 +1,9 @@
+---
+# Source: service-a/charts/gateway/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-a-gateway
+  namespace: service-a
+data:
+  host: "service-a.example.com"
