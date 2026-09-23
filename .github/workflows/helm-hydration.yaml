@@ -596,7 +596,7 @@ jobs:
       # Publishes the rendered manifests so that a calling workflow can inspect
       # or compare them without going through an environment branch.
       if: ${{ inputs.upload-artifact }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: hydrated-${{ steps.chart.outputs.name }}-${{ matrix.entry.env }}
         path: ${{ steps.chart.outputs.manifest-dir }}/
