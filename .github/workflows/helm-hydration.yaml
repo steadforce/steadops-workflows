@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
     - define-matrix
-    if: ${{ inputs.create-pull-request }}
+    if: ${{ inputs.create-pull-request && github.actor != 'nektos/act' }}
     # Permissions required by this job:
     #   contents: write  – push the initial commit of a new environment branch.
     #   issues: write    – create the per-environment label with a fixed colour.
