@@ -25,7 +25,7 @@ if you need to validate or modify manifests before deployment.
 | `charts-root` | Directory the chart search starts from | `.` | No |
 | `chart-discovery-depth` | Maximum search depth for `helm-config.yaml` below `charts-root` | `1` | No |
 | `create-pull-request` | Push the hydrated manifests to the environment branch and open a pull request. Set to `false` to render only | `true` | No |
-| `upload-artifact` | Publish the rendered manifests as one artifact per chart and environment, named `hydrated-<chart>-<environment>` | `false` | No |
+| `upload-artifact` | Publish the rendered manifests as one artifact holding a directory `hydrated-<chart>-<environment>` per chart and environment. The artifact is named `hydrated-manifests`, followed by `-<charts-root>` when `charts-root` is not the repository root | `false` | No |
 
 **Required repository layout:**
 
@@ -100,15 +100,15 @@ apps/
 permissions:
   contents: write
   pull-requests: write
-  issues: write        # optional, see below
+  issues: write
 ```
 
-`issues: write` is only needed to give the per-environment label a fixed colour.
-Labels belong to the issues API even when they are only ever used on pull
-requests, and the permissions of a reusable workflow are capped by those of its
-caller, so the workflow cannot grant it to itself. Without it the run still
-succeeds: the label is applied to the pull request either way, GitHub just
-picks a random colour for it the first time it appears.
+`issues: write` is required. The workflow uses it to give the per-environment
+label a fixed colour, and labels belong to the issues API even when they are
+only ever used on pull requests. The permissions of a reusable workflow are
+capped by those of its caller, so a caller that does not grant `issues: write`
+makes GitHub refuse to start the workflow. This also applies in render-only
+mode (`create-pull-request: false`), even though no label is created then.
 
 **Usage example:**
 ```yaml
@@ -140,11 +140,22 @@ jobs:
 ```
 
 **How it works:**
-1. Searches `charts-root` for `helm-config.yaml` files and builds a parallel job matrix — one job per chart and environment.
-2. Creates the `environments/<name>` branch on origin once per environment if it does not exist yet, as an orphan branch, and creates the `env: <name>` label if it does not exist yet.
-3. For each chart and environment: installs Helm, reads the chart name and the resolved primary subchart version from `Chart.lock`, installs the dependencies pinned in `Chart.lock`, runs `helm template` with the environment-specific value files and API groups, and post-processes CRD manifests to inject ArgoCD `ServerSideApply=true` and sync-wave `-1` annotations. If `bundle-patches-in-one-pr` is `true`, the patch segment of the version is replaced with `x`.
-4. Moves the manifests onto the environment branch, replacing only the output of the chart being hydrated.
-5. Opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`.
+
+One `hydrate` job renders every chart and environment, and a `create-pull-request`
+job runs only for the pairs whose manifests changed:
+
+1. Searches `charts-root` for `helm-config.yaml` files and installs Helm once.
+2. For each chart: installs the dependencies pinned in `Chart.lock` and reads the chart name and the resolved primary subchart version from it. If `bundle-patches-in-one-pr` is `true`, the patch segment of the version is replaced with `x`.
+3. For each of the chart's environments: runs `helm template` with the environment-specific value files and API groups, and post-processes CRD manifests to inject ArgoCD `ServerSideApply=true` and sync-wave `-1` annotations. A chart or environment that fails is reported and skipped; the others are still hydrated and the job fails at the end.
+4. Creates the `environments/<name>` branch on origin if it does not exist yet, as an orphan branch, and creates the `env: <name>` label if it does not exist yet.
+5. Compares the rendered manifests of each chart and environment against the open pull request for it, or against the environment branch when there is none, and selects the pairs that changed.
+6. For each selected pair, a `create-pull-request` job replaces only that chart's output on the environment branch and opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`.
+
+A push that changes no manifests therefore starts no pull-request job, and in a
+repository holding several charts a change to one chart only opens pull requests
+for that chart. Every chart and environment is still rendered on every run,
+because a change outside a chart's directory, or an upstream release for a chart
+without a committed `Chart.lock`, can change its manifests too.
 
 **Environment label colours:**
 
@@ -247,12 +258,18 @@ jobs:
 ```
 
 **How it works:**
-1. Finds every chart with a `tests/` directory and builds a job matrix from them.
-2. Installs the requested Helm version and the `helm-unittest` plugin.
-3. Runs `helm dependency update` to resolve chart dependencies.
-4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
-5. Runs `helm lint` to validate the chart.
-6. On Renovate branches (refs containing `renovate/`), sends a success or failure notification to MS Teams, if the webhook secret was passed.
+
+All charts are tested by one job:
+
+1. Finds every chart with a `tests/` directory.
+2. Installs the requested Helm version and the `helm-unittest` plugin once.
+3. For each chart: runs `helm dependency update` to resolve the chart dependencies, then `helm unittest`.
+4. Publishes the JUnit test results of all charts as one summary to the GitHub Actions UI.
+5. Runs `helm lint` for each chart.
+6. On Renovate branches (refs containing `renovate/`), sends one success or failure notification to MS Teams, if the webhook secret was passed.
+
+A chart whose tests or lint fail does not stop the others. The job fails once
+every chart ran.
 
 ---
 

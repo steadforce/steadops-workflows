@@ -1,21 +1,34 @@
 # Helm Hydration
 #
 # This is the complete, production-ready Helm hydration pipeline. It combines
-# all building blocks: it discovers the charts in the repository, dynamically
-# builds a GitHub Actions job matrix from the environment keys defined in their
-# `helm-config.yaml`, installs Helm, installs the chart dependencies pinned in
-# `Chart.lock`, renders environment-specific Kubernetes manifests using
-# `helm template`, and opens a version-aware pull request per chart and
-# environment. Optionally, patch-level subchart updates are bundled into a
-# single PR by replacing the patch segment of the version with "x".
+# all building blocks: it discovers the charts in the repository, reads the
+# environments of each chart from its `helm-config.yaml`, installs Helm,
+# installs the chart dependencies pinned in `Chart.lock`, renders
+# environment-specific Kubernetes manifests using `helm template`, and opens a
+# version-aware pull request per chart and environment whose manifests changed.
+# Optionally, patch-level subchart updates are bundled into a single PR by
+# replacing the patch segment of the version with "x".
 #
 # Purpose
 # -------
 # Instead of hard-coding environment names (e.g. dev, staging, prod) inside
-# the workflow, they are read at runtime from `helm-config.yaml`.  The
-# resulting JSON array fans out into parallel jobs – one per chart and
-# environment – each of which produces a fully rendered set of manifests ready
-# for GitOps consumption.
+# the workflow, they are read at runtime from `helm-config.yaml`. Every chart
+# and environment is rendered into a fully hydrated set of manifests ready for
+# GitOps consumption.
+#
+# Job layout
+# ----------
+# All charts and environments are rendered by one job. Rendering a pair takes
+# seconds, while a job of its own costs a checkout, a Helm installation and a
+# dependency build, and is billed by the started minute. A repository holding
+# ten charts with three environments each would otherwise start thirty jobs on
+# every push.
+#
+# Only the pairs whose rendered manifests differ from what the environment
+# branch, or the open pull request for it, already holds fan out into a
+# pull-request job. A push that changes one chart therefore opens pull requests
+# for that chart only, and a push that changes no manifest at all starts no
+# pull-request job.
 #
 # Expected repository layout
 # --------------------------
@@ -42,23 +55,22 @@
 #
 # Output
 # ------
-#   define-matrix.outputs.matrix       – JSON array of chart/environment pairs, e.g.
-#                                        [{"chart":".","env":"dev"}].
-#                                        Consumed downstream via fromJSON().
-#   define-matrix.outputs.environments – JSON array of the distinct environment
-#                                        names across all charts, e.g. ["dev","prod"].
-#   define-matrix.outputs.multi-chart  – "true" when more than one chart was found.
 #   hydrated-manifests/                – Directory tree written by helm template,
 #                                        one sub-folder per chart component. When
 #                                        several charts are hydrated into the same
 #                                        branch, each chart owns the sub-directory
 #                                        `hydrated-manifests/<chart name>`.
-#   Artifact                           – One artifact per chart and environment
-#                                        holding the rendered manifests, when
-#                                        `upload-artifact` is enabled.
-#   Pull request                       – One PR per chart and environment targeting
-#                                        the `environments/<name>` branch, carrying
-#                                        the rendered manifests as a commit on
+#   Artifact                           – One artifact holding a directory
+#                                        `hydrated-<chart>-<environment>` per chart
+#                                        and environment, when `upload-artifact`
+#                                        is enabled. It is named
+#                                        `hydrated-manifests`, followed by
+#                                        `-<charts-root>` when charts-root is not
+#                                        the repository root.
+#   Pull request                       – One PR per changed chart and environment
+#                                        targeting the `environments/<name>`
+#                                        branch, carrying the rendered manifests
+#                                        as a commit on
 #                                        `hydration-pull-request/<name>[-<chart>]-<version>`.
 
 name: Helm hydration
@@ -110,42 +122,71 @@ on:
         description: "Push the hydrated manifests to the environment branch and open a pull request."
         type: boolean
       upload-artifact:
-        # Publishes the rendered manifests of each chart and environment as a
-        # workflow artifact named `hydrated-<chart>-<environment>`.
+        # Publishes the rendered manifests of every chart and environment as one
+        # workflow artifact holding a directory `hydrated-<chart>-<environment>`
+        # per pair.
         default: false
         description: "Upload the hydrated manifests as a workflow artifact."
         type: boolean
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job: define-matrix
-  # Discovers every chart below `charts-root` and expands it into one matrix
-  # entry per environment declared in that chart's helm-config.yaml.
+  # Job: hydrate
+  # Renders every chart and environment in a single job:
+  #   1. Discovers every chart below `charts-root`.
+  #   2. Installs the requested Helm version once.
+  #   3. Per chart: installs the dependencies, pinned by Chart.lock when it
+  #      exists, and resolves the chart name and the primary subchart version.
+  #   4. Per chart and environment: renders the manifests via `helm template`.
+  #   5. Ensures the `environments/<name>` branches and labels exist.
+  #   6. Selects the chart/environment pairs whose manifests changed.
+  #   7. Uploads the rendered manifests as an artifact, for the pull-request
+  #      jobs and, when `upload-artifact` is enabled, for the caller.
   #
-  # Example output:  matrix=[{"chart":"apps/loki","env":"dev"}]
-  #                  environments=["dev","prod"]
-  #                  multi-chart=true
+  # A chart or environment that fails to render is reported and skipped, and
+  # the others are still hydrated. The job fails at the end of the render step
+  # in that case, while the later steps and the pull-request jobs still run for
+  # the pairs that did render.
+  #
+  # Permissions required by this job:
+  #   contents: write      – push the initial commit of a new environment branch.
+  #   issues: write        – create the per-environment label with a fixed colour.
+  #                          Labels are part of the issues API even when they are
+  #                          only ever used on pull requests.
+  #   pull-requests: read  – look up the open pull request of each pair.
   # ---------------------------------------------------------------------------
-  define-matrix:
+  hydrate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: read
     outputs:
-      # JSON array of {chart, env} objects, one per chart and environment.
-      matrix: ${{ steps.define.outputs.matrix }}
-      # JSON array of the distinct environment names, e.g. ["dev","prod"].
-      environments: ${{ steps.define.outputs.environments }}
-      # "true" when the repository holds more than one chart.
-      multi-chart: ${{ steps.define.outputs.multi-chart }}
+      # JSON array of the chart/environment pairs that need a pull request.
+      pull-requests: ${{ steps.select.outputs.pull-requests }}
+      # Name of the artifact holding the rendered manifests.
+      artifact: ${{ steps.discover.outputs.artifact }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
-    - name: Discover charts and environments
-      id: define
+    - name: Discover charts
+      # A directory is a chart when it holds a helm-config.yaml. The sorted
+      # list is what the render step iterates over, so the output order does
+      # not depend on the order in which the filesystem returns directories.
+      id: discover
       env:
         CHARTS_ROOT: ${{ inputs.charts-root }}
         DISCOVERY_DEPTH: ${{ inputs.chart-discovery-depth }}
       run: |
         set -euo pipefail
-        # A directory is a chart when it holds a helm-config.yaml.
+        # Paths shared by the steps below. They live outside the checkout, so
+        # nothing rendered here can end up in a commit by accident.
+        CHART_LIST="$RUNNER_TEMP/charts.txt"
+        {
+          echo "CHART_LIST=$CHART_LIST"
+          echo "OUTPUT_ROOT=$RUNNER_TEMP/hydrated"
+          echo "PAIRS_FILE=$RUNNER_TEMP/hydrated-pairs.jsonl"
+        } >> "$GITHUB_ENV"
         configs=()
         while IFS= read -r -d '' config; do
           configs+=("$config")
@@ -154,211 +195,27 @@ jobs:
           echo "::error::No helm-config.yaml found below '$CHARTS_ROOT' within depth $DISCOVERY_DEPTH."
           exit 1
         fi
-        # yq extracts the keys of the `environments` map and converts them to
-        # a compact (single-line) JSON array, which is the format required by
-        # the GitHub Actions `fromJSON()` expression used in matrix definitions.
-        # explode(.) resolves YAML anchors and aliases before querying, because
-        # helm-config.yaml commonly shares environment definitions via anchors.
-        # The result is sorted so the matrix order does not depend on the order
-        # in which the filesystem returns the chart directories.
-        matrix=$(
-          for config in "${configs[@]}"; do
-            yq -o=json -I=0 'explode(.) | .environments | keys' "$config" \
-              | jq -c --arg chart "$(dirname "$config")" '.[] | {chart: $chart, env: .}'
-          done | jq -sc 'sort_by(.chart, .env)'
-        )
-        # The distinct environments drive the branch preparation job below.
-        environments=$(jq -c '[.[].env] | unique' <<< "$matrix")
+        for config in "${configs[@]}"; do
+          dirname "$config"
+        done > "$CHART_LIST"
+        echo "Found ${#configs[@]} chart(s):"
+        cat "$CHART_LIST"
         multi_chart=false
         if [ "${#configs[@]}" -gt 1 ]; then
           multi_chart=true
         fi
+        # The artifact carries charts-root in its name, so that a caller
+        # hydrating several roots in one run does not produce two artifacts of
+        # the same name, which GitHub rejects.
+        root_suffix=$(printf '%s' "$CHARTS_ROOT" | sed -E 's#^\./##; s#[^A-Za-z0-9._-]+#-#g; s#^-+##; s#-+$##')
+        artifact=hydrated-manifests
+        if [ -n "$root_suffix" ] && [ "$root_suffix" != "." ]; then
+          artifact="$artifact-$root_suffix"
+        fi
         {
-          echo "matrix=$matrix"
-          echo "environments=$environments"
           echo "multi-chart=$multi_chart"
+          echo "artifact=$artifact"
         } >> "$GITHUB_OUTPUT"
-
-  # ---------------------------------------------------------------------------
-  # Job: prepare-environment-branches
-  # Ensures the `environments/<name>` branch exists on origin before any chart
-  # is hydrated into it, creating it as an orphan branch on first use.
-  #
-  # Running this once per environment keeps the hydration jobs of several charts
-  # from racing each other to create the same branch. The job is skipped when
-  # `create-pull-request` is false, because nothing is pushed in that case.
-  #
-  # Matrix variable:
-  #   environment – the environment name for this job instance, e.g. "dev"
-  # ---------------------------------------------------------------------------
-  prepare-environment-branches:
-    runs-on: ubuntu-latest
-    needs:
-    - define-matrix
-    if: ${{ inputs.create-pull-request && github.actor != 'nektos/act' }}
-    # Permissions required by this job:
-    #   contents: write  – push the initial commit of a new environment branch.
-    #   issues: write    – create the per-environment label with a fixed colour.
-    #                      Labels are part of the issues API even when they are
-    #                      only ever used on pull requests. A caller that does not
-    #                      grant this still works: the label is applied by the
-    #                      pull request step either way, GitHub just picks a
-    #                      random colour for it the first time.
-    permissions:
-      contents: write
-      issues: write
-    strategy:
-      fail-fast: false
-      matrix:
-        environment: ${{ fromJSON(needs.define-matrix.outputs.environments) }}
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v7
-    - name: Ensure environment branch exists
-      env:
-        BRANCH: environments/${{ matrix.environment }}
-        ACTOR: ${{ github.actor }}
-        ACTOR_ID: ${{ github.actor_id }}
-      run: |
-        set -euo pipefail
-        if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
-          echo "Branch '$BRANCH' already exists on origin."
-          exit 0
-        fi
-        # A git identity must be configured before committing because the
-        # GitHub Actions runner has no global git user set by default.
-        # github.actor_id and github.actor are built-in context variables, so
-        # no API call is needed to construct the standard GitHub noreply address
-        # (<id>+<login>@users.noreply.github.com).
-        git config user.name "$ACTOR"
-        git config user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
-        # An orphan branch gives the hydrated manifests a clean history separate
-        # from the branch the chart sources live on.
-        git switch --orphan "$BRANCH"
-        git commit --allow-empty -m "chore: initialise $BRANCH branch"
-        git push origin "$BRANCH"
-    - name: Ensure environment label exists
-      # Gives the "env: <name>" label a colour before any pull request carries
-      # it. Without this GitHub creates the label implicitly, the first time it
-      # is applied, in a random colour — which defeats the point of colouring
-      # the environment in the first place.
-      #
-      # The tier chooses the colour family and a hash of the full name chooses
-      # the shade within it, so that "is this production" is answerable from the
-      # colour alone while sibling clusters of the same tier stay apart.
-      #
-      # The tier is read from the name's segments rather than from the whole
-      # name, because an environment is commonly named after its cluster with
-      # the tier as one part of it — sf-k8s01-prod is a production environment
-      # and sf-k8s02-dev is not, and matching the whole name recognises neither.
-      # Segments also stop "sf-devops" from being read as a development tier,
-      # which a plain substring match would.
-      #
-      # Where several tiers appear in one name the most severe wins, so nothing
-      # that mentions production is coloured as though it were not.
-      #
-      # An existing label is left alone. A repository that recoloured it on
-      # purpose should not have that reverted on the next hydration run.
-      env:
-        GH_TOKEN: ${{ github.token }}
-        ENVIRONMENT: ${{ matrix.environment }}
-      run: |
-        set -euo pipefail
-        label="env: $ENVIRONMENT"
-
-        # tr -cs collapses every run of non-alphanumeric characters into one
-        # space, so sf-k8s01-prod becomes the segments "sf k8s01 prod".
-        segments=$(printf '%s' "$ENVIRONMENT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ')
-        rank=0
-        for segment in $segments; do
-          case "$segment" in
-            prod|prod[0-9]*|production|live|prd)  if [ "$rank" -lt 5 ]; then rank=5; fi ;;
-            stage|staging|stg|preprod|uat)        if [ "$rank" -lt 4 ]; then rank=4; fi ;;
-            test|test[0-9]*|testing|qa|int)       if [ "$rank" -lt 3 ]; then rank=3; fi ;;
-            dev|dev[0-9]*|develop|development)    if [ "$rank" -lt 2 ]; then rank=2; fi ;;
-            local|localhost|sandbox|demo|kind|minikube)
-                                                  if [ "$rank" -lt 1 ]; then rank=1; fi ;;
-          esac
-        done
-
-        case "$rank" in
-          5) family=(b60205 d73a4a cf222e a40e26 e5534b 8e1519) ;;  # production, red
-          4) family=(d93f0b e36209 bf5b04 c2410c ea7317 fb8500) ;;  # staging, orange
-          3) family=(1d76db 0052cc 218bff 0366d6 0a3069 4184e4) ;;  # test, blue
-          2) family=(0e8a16 2ea043 1a7f37 3fb950 116329 57ab5a) ;;  # development, green
-          1) family=(6e7781 57606a 424a53 8c959f 795548 4d5358) ;;  # throwaway, grey
-          *) family=(5319e7 006b75 8250df bf3989 9a6700 1b7c83) ;;  # unrecognised
-        esac
-
-        # Sibling environments of one tier usually differ only by a number, so
-        # the number picks the shade where there is one: consecutive clusters
-        # then get consecutive shades and cannot collide, which a hash of names
-        # differing in one character regularly does. 10# forces base ten, or a
-        # zero padded 08 would be read as an invalid octal literal. Only the last
-        # six digits are used, so a name carrying a date cannot overflow.
-        #
-        # Names with no number fall back to a hash of the name, which is stable
-        # for a given name across every run and every repository.
-        digits=$(printf '%s' "$ENVIRONMENT" | tr -cd '0-9' | tail -c 6)
-        if [ -n "$digits" ]; then
-          index=$(( 10#$digits % ${#family[@]} ))
-        else
-          index=$(( 0x$(printf '%s' "$ENVIRONMENT" | sha256sum | cut -c1-4) % ${#family[@]} ))
-        fi
-        colour=${family[$index]}
-
-        if error=$(gh label create "$label" \
-              --color "$colour" \
-              --description "Hydrated manifests for the $ENVIRONMENT environment" 2>&1); then
-          echo "Created label '$label' in #$colour."
-        elif printf '%s' "$error" | grep -q "already exists"; then
-          echo "Label '$label' already exists, leaving its colour alone."
-        else
-          # Most likely the calling workflow does not grant issues: write. The
-          # label is still applied to the pull request, so this is not fatal.
-          echo "::warning::could not create the label '$label': $error"
-        fi
-
-  # ---------------------------------------------------------------------------
-  # Job: hydrate-chart
-  # Runs once per chart and environment in the matrix produced by
-  # `define-matrix`. Each parallel job:
-  #   1. Installs the requested Helm version.
-  #   2. Installs the chart dependencies, pinned by Chart.lock when it exists.
-  #   3. Resolves the chart name and the primary subchart version.
-  #   4. Renders environment-specific Kubernetes manifests via `helm template`.
-  #   5. Collects them under `hydrated-manifests`, on the `environments/<name>`
-  #      branch when a pull request is created.
-  #   6. Opens (or updates) a pull request against the environment branch so
-  #      the GitOps agent (e.g. ArgoCD) can pick up the new manifests.
-  #
-  # Matrix variable:
-  #   entry.chart – the chart directory for this job instance, e.g. "apps/loki"
-  #   entry.env   – the environment name for this job instance, e.g. "dev"
-  # ---------------------------------------------------------------------------
-  hydrate-chart:
-    runs-on: ubuntu-latest
-    needs:
-    - define-matrix
-    - prepare-environment-branches
-    # prepare-environment-branches is skipped when no pull request is created,
-    # and a skipped dependency would otherwise skip this job as well.
-    if: ${{ !cancelled() && needs.define-matrix.result == 'success' && needs.prepare-environment-branches.result != 'failure' }}
-    # Permissions required by the `Create pull request` step:
-    #   contents: write       – push the hydrated-manifests source branch.
-    #   pull-requests: write  – open / update the PR against the environment branch.
-    permissions:
-      contents: write
-      pull-requests: write
-    strategy:
-      # Run all chart/environment jobs in parallel. fail-fast is set to false so
-      # that a failing matrix job does not cancel sibling jobs.
-      fail-fast: false
-      matrix:
-        entry: ${{ fromJSON(needs.define-matrix.outputs.matrix) }}
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v7
     - name: Set up Helm
       # Installs the Helm CLI at the version requested via the workflow input.
       # Pinning to a specific version (e.g. "v3.17.0") ensures reproducible builds.
@@ -370,100 +227,12 @@ jobs:
       # setup step succeeded and making the exact version traceable in CI output.
       run: |
         helm version
-    - name: Build Helm dependencies
-      # Installs the subcharts into charts/. This must run before the version is
-      # resolved and before templating, because it is what produces Chart.lock
-      # for a chart that does not commit one.
-      env:
-        CHART_DIR: ${{ matrix.entry.chart }}
-      run: |
-        set -euo pipefail
-        # `helm dependency build` resolves https repositories against the local
-        # repository list rather than by URL, and a runner starts with none
-        # registered. Every repository the chart declares is added first; oci://
-        # and file:// dependencies need no entry. explode(.) resolves the anchors
-        # Chart.yaml commonly uses for the dependency name.
-        while IFS=$'\t' read -r dep_name dep_url; do
-          case "$dep_url" in
-            ''|oci://*|file://*) continue ;;
-          esac
-          helm repo add "$dep_name" "$dep_url" --force-update > /dev/null
-        done < <(yq -N -r 'explode(.) | .dependencies[]? | [.name, .repository] | @tsv' "$CHART_DIR/Chart.yaml")
-        if [ -f "$CHART_DIR/Chart.lock" ]; then
-          # The committed lock file decides which versions are installed, which
-          # makes the rendered manifests a function of the commit alone. This
-          # fails when Chart.lock and Chart.yaml disagree.
-          helm dependency build "$CHART_DIR"
-        else
-          echo "::warning::$CHART_DIR/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change the rendered manifests without a commit. Run 'helm dependency update' and commit the lock file."
-          helm dependency update "$CHART_DIR"
-        fi
-    - name: Resolve chart metadata
-      # Derives everything that depends on which chart is being hydrated: the
-      # chart name, the directory the manifests are written to, the suffix that
-      # keeps PR branches of different charts apart, and the version reported in
-      # the branch name and PR title.
-      id: chart
-      env:
-        CHART_DIR: ${{ matrix.entry.chart }}
-        MULTI_CHART: ${{ needs.define-matrix.outputs.multi-chart }}
-        BUNDLE_PATCHES: ${{ inputs.bundle-patches-in-one-pr }}
-      run: |
-        set -euo pipefail
-        # explode(.) resolves YAML anchors and aliases before querying, because
-        # Chart.yaml and helm-config.yaml use anchors to avoid repetition.
-        CHART_NAME=$(yq 'explode(.) | .name' "$CHART_DIR/Chart.yaml")
-        # A repository holding a single chart owns the whole hydrated-manifests
-        # directory. Charts sharing an environment branch each own a
-        # sub-directory of it and carry their name in the PR branch.
-        if [ "$MULTI_CHART" = "true" ]; then
-          MANIFEST_DIR="hydrated-manifests/$CHART_NAME"
-          BRANCH_SUFFIX="-$CHART_NAME"
-        else
-          MANIFEST_DIR="hydrated-manifests"
-          BRANCH_SUFFIX=""
-        fi
-        # The primary dependency is the subchart whose version identifies this
-        # chart. It defaults to the dependency sharing the chart's own name, which
-        # covers umbrella charts wrapping a single upstream chart of the same name.
-        # Charts wrapping a differently named upstream chart declare it explicitly
-        # via `primaryDependency` in helm-config.yaml.
-        DEP_NAME=$(yq 'explode(.) | .primaryDependency // ""' "$CHART_DIR/helm-config.yaml")
-        if [ -z "$DEP_NAME" ]; then
-          DEP_NAME=$CHART_NAME
-        fi
-        # Chart.lock records the version installed by the previous step, so the
-        # reported version always matches the rendered manifests. It is also
-        # always a concrete semver rather than a constraint, which keeps it valid
-        # inside a git branch name.
-        # The dependency is selected by name to be resilient to ordering changes
-        # in the dependencies list.
-        if [ -f "$CHART_DIR/Chart.lock" ]; then
-          VERSION=$(DEP_NAME=$DEP_NAME yq '.dependencies[] | select(.name == strenv(DEP_NAME)) | .version' "$CHART_DIR/Chart.lock")
-          if [ -z "$VERSION" ]; then
-            echo "::error::Dependency '$DEP_NAME' is not listed in $CHART_DIR/Chart.lock. Set 'primaryDependency' in helm-config.yaml to name the subchart that identifies this chart."
-            exit 1
-          fi
-        else
-          # A chart without dependencies has no lock file, so its own version
-          # identifies it.
-          VERSION=$(yq 'explode(.) | .version' "$CHART_DIR/Chart.yaml")
-        fi
-        if [ "$BUNDLE_PATCHES" = "true" ]; then
-          # Replace the patch segment with "x" to bundle patch updates in one PR.
-          VERSION=$(echo "$VERSION" | cut -d. -f1,2).x
-        fi
-        {
-          echo "name=$CHART_NAME"
-          echo "manifest-dir=$MANIFEST_DIR"
-          echo "branch-suffix=$BRANCH_SUFFIX"
-          echo "version=$VERSION"
-        } >> "$GITHUB_OUTPUT"
     - name: Hydrate
-      # Renders Kubernetes manifests for the current chart and environment using
-      # `helm template`.  All rendered files are written to a temporary
-      # directory (`$RUNNER_TEMP/hydrated-manifests`) so that intermediate
-      # state is never accidentally committed.
+      # Installs the dependencies of every chart once and renders it for each of
+      # its environments. The manifests of a pair are written to
+      # `$OUTPUT_ROOT/hydrated-<chart>-<environment>`, which holds exactly what
+      # ends up in the chart's manifest directory on the environment branch.
+      # Every rendered pair is recorded as one JSON line in $PAIRS_FILE.
       #
       # Variables read from helm-config.yaml:
       #   releaseName  – Helm release name (required).
@@ -484,129 +253,533 @@ jobs:
       #   --include-crds         Include CRD manifests in the output.
       #   --release-name         Include the release name in the output-dir path.
       #   --skip-tests           Omit test hook manifests from the output.
+      id: hydrate
       env:
-        CHART_DIR: ${{ matrix.entry.chart }}
-        HYDRATION: ${{ matrix.entry.env }}
+        MULTI_CHART: ${{ steps.discover.outputs.multi-chart }}
+        BUNDLE_PATCHES: ${{ inputs.bundle-patches-in-one-pr }}
+        REGISTERED_REPOSITORIES: ${{ runner.temp }}/helm-repositories.txt
       run: |
-        set -euo pipefail
-        CONFIG="$CHART_DIR/helm-config.yaml"
-        RELEASE_NAME=$(yq 'explode(.) | .releaseName // ""' "$CONFIG")
-        NAMESPACE=$(yq 'explode(.) | .namespace // ""' "$CONFIG")
-        if [[ -z "$RELEASE_NAME" ]]; then
-          echo "Error: releaseName is required in $CONFIG" >&2
+        set -uo pipefail
+
+        # Installs the subcharts of one chart into its charts/ directory and
+        # writes the metadata the render and pull-request steps need to $2.
+        prepare_chart() {
+          local chart_dir=$1 metadata_file=$2
+          local config="$chart_dir/helm-config.yaml"
+
+          # `helm dependency build` resolves https repositories against the
+          # local repository list rather than by URL, and a runner starts with
+          # none registered. Every repository the chart declares is added first;
+          # oci:// and file:// dependencies need no entry. Charts commonly share
+          # repositories, so each URL is added once per run, under a name
+          # derived from the URL so that two charts using the same dependency
+          # name for different repositories cannot overwrite each other's entry.
+          # explode(.) resolves the anchors Chart.yaml commonly uses for the
+          # dependency name.
+          local dep_url
+          while IFS= read -r dep_url; do
+            case "$dep_url" in
+              ''|oci://*|file://*) continue ;;
+            esac
+            if grep -qxF "$dep_url" "$REGISTERED_REPOSITORIES" 2> /dev/null; then
+              continue
+            fi
+            helm repo add "repo-$(printf '%s' "$dep_url" | sha256sum | cut -c1-12)" "$dep_url" --force-update > /dev/null
+            printf '%s\n' "$dep_url" >> "$REGISTERED_REPOSITORIES"
+          done < <(yq -N -r 'explode(.) | .dependencies[]? | .repository' "$chart_dir/Chart.yaml")
+          # `helm repo add` has just downloaded the index of every repository,
+          # so --skip-refresh keeps helm from downloading all of them again for
+          # each chart.
+          if [ -f "$chart_dir/Chart.lock" ]; then
+            # The committed lock file decides which versions are installed,
+            # which makes the rendered manifests a function of the commit alone.
+            # This fails when Chart.lock and Chart.yaml disagree.
+            helm dependency build --skip-refresh "$chart_dir"
+          else
+            echo "::warning::$chart_dir/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change the rendered manifests without a commit. Run 'helm dependency update' and commit the lock file."
+            helm dependency update --skip-refresh "$chart_dir"
+          fi
+
+          # explode(.) resolves YAML anchors and aliases before querying, because
+          # Chart.yaml and helm-config.yaml use anchors to avoid repetition.
+          local chart_name release_name namespace
+          chart_name=$(yq 'explode(.) | .name' "$chart_dir/Chart.yaml")
+          release_name=$(yq 'explode(.) | .releaseName // ""' "$config")
+          namespace=$(yq 'explode(.) | .namespace // ""' "$config")
+          if [ -z "$release_name" ]; then
+            echo "::error::releaseName is required in $config"
+            return 1
+          fi
+          if [ -z "$namespace" ]; then
+            echo "::error::namespace is required in $config"
+            return 1
+          fi
+
+          # A repository holding a single chart owns the whole hydrated-manifests
+          # directory. Charts sharing an environment branch each own a
+          # sub-directory of it and carry their name in the PR branch.
+          local manifest_dir branch_suffix
+          if [ "$MULTI_CHART" = "true" ]; then
+            manifest_dir="hydrated-manifests/$chart_name"
+            branch_suffix="-$chart_name"
+          else
+            manifest_dir="hydrated-manifests"
+            branch_suffix=""
+          fi
+
+          # The primary dependency is the subchart whose version identifies this
+          # chart. It defaults to the dependency sharing the chart's own name,
+          # which covers umbrella charts wrapping a single upstream chart of the
+          # same name. Charts wrapping a differently named upstream chart declare
+          # it explicitly via `primaryDependency` in helm-config.yaml.
+          local dep_name version
+          dep_name=$(yq 'explode(.) | .primaryDependency // ""' "$config")
+          if [ -z "$dep_name" ]; then
+            dep_name=$chart_name
+          fi
+          # Chart.lock records the version installed above, so the reported
+          # version always matches the rendered manifests. It is also always a
+          # concrete semver rather than a constraint, which keeps it valid
+          # inside a git branch name.
+          # The dependency is selected by name to be resilient to ordering
+          # changes in the dependencies list.
+          if [ -f "$chart_dir/Chart.lock" ]; then
+            version=$(DEP_NAME=$dep_name yq '.dependencies[] | select(.name == strenv(DEP_NAME)) | .version' "$chart_dir/Chart.lock")
+            if [ -z "$version" ]; then
+              echo "::error::Dependency '$dep_name' is not listed in $chart_dir/Chart.lock. Set 'primaryDependency' in helm-config.yaml to name the subchart that identifies this chart."
+              return 1
+            fi
+          else
+            # A chart without dependencies has no lock file, so its own version
+            # identifies it.
+            version=$(yq 'explode(.) | .version' "$chart_dir/Chart.yaml")
+          fi
+          if [ "$BUNDLE_PATCHES" = "true" ]; then
+            # Replace the patch segment with "x" to bundle patch updates in one PR.
+            version=$(echo "$version" | cut -d. -f1,2).x
+          fi
+
+          jq -n \
+            --arg chart_dir "$chart_dir" \
+            --arg name "$chart_name" \
+            --arg release_name "$release_name" \
+            --arg namespace "$namespace" \
+            --arg manifest_dir "$manifest_dir" \
+            --arg branch_suffix "$branch_suffix" \
+            --arg version "$version" \
+            '{"chart-dir": $chart_dir, name: $name, "release-name": $release_name, namespace: $namespace,
+              "manifest-dir": $manifest_dir, "branch-suffix": $branch_suffix, version: $version}' \
+            > "$metadata_file"
+        }
+
+        # Renders one chart for one environment into $4.
+        render_environment() {
+          local chart_dir=$1 release_name=$2 namespace=$3 output_dir=$4 hydration=$5
+          local config="$chart_dir/helm-config.yaml"
+          local apis value_files
+          apis=$(hydration=$hydration yq 'explode(.) | (.environments.[env(hydration)].apis // []) | @csv' "$config")
+          # Value file paths are declared relative to the chart, so they are
+          # prefixed with the chart directory before being handed to helm.
+          value_files=$(hydration=$hydration chart_dir=$chart_dir yq 'explode(.) | (.environments.[env(hydration)].valueFiles // []) | map(env(chart_dir) + "/" + .) | @csv' "$config")
+          local helm_args=()
+          if [ -n "$apis" ]; then
+            helm_args+=(-a "$apis")
+          fi
+          if [ -n "$value_files" ]; then
+            helm_args+=(-f "$value_files")
+          fi
+          helm template "$release_name" "$chart_dir" \
+            "${helm_args[@]}" \
+            -n "$namespace" \
+            --output-dir "$output_dir" \
+            --include-crds \
+            --release-name \
+            --skip-tests
+          # Post-process all rendered YAML manifests to inject ArgoCD annotations
+          # required for reliable CRD management via server-side apply.
+          #
+          # Why server-side apply for CRDs?
+          #   CRD manifests often carry large `last-applied-configuration`
+          #   annotations that exceed the 256 KiB annotation size limit enforced
+          #   by Kubernetes. Using ServerSideApply=true tells ArgoCD to apply
+          #   them with server-side apply (SSA), which avoids storing the full
+          #   manifest in annotations.
+          #
+          # Why sync-wave "-1"?
+          #   Setting the sync-wave to -1 ensures CRDs are applied before all
+          #   other resources (wave 0 and above), so that custom resources that
+          #   depend on them are never applied before their CRD exists in the
+          #   cluster.
+          #
+          # The yq expression handles three cases for each CRD manifest:
+          #   1. No sync-options annotation at all → create it with "ServerSideApply=true".
+          #   2. sync-options annotation exists but does not contain "ServerSideApply=" →
+          #      append ",ServerSideApply=true" to the existing value.
+          #   3. No sync-wave annotation → create it with "-1".
+          #      (If sync-wave is already set it is left unchanged.)
+          find "$output_dir" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec yq -i '
+            select(.kind == "CustomResourceDefinition" and
+              .metadata.annotations["argocd.argoproj.io/sync-options"] == null)
+              .metadata.annotations["argocd.argoproj.io/sync-options"] = "ServerSideApply=true" |
+            select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-options"] != null and
+              (.metadata.annotations["argocd.argoproj.io/sync-options"] |
+              contains("ServerSideApply=") | not))
+              .metadata.annotations["argocd.argoproj.io/sync-options"] |= . + ",ServerSideApply=true" |
+            select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
+              .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
+          ' {} \;
+        }
+
+        # A failing chart or environment must not stop the others, as it did
+        # not when every pair ran in a job of its own. The functions therefore
+        # run in a child bash with errexit enabled: bash ignores errexit inside
+        # a function that is called as the condition of an `if`, but not inside
+        # a new process started from there.
+        export -f prepare_chart render_environment
+        run() {
+          bash -euo pipefail -c '"$@"' _ "$@" < /dev/null
+        }
+
+        mkdir -p "$OUTPUT_ROOT"
+        : > "$PAIRS_FILE"
+        metadata="$RUNNER_TEMP/chart-metadata.json"
+        failed=()
+        while IFS= read -r chart_dir; do
+          echo "::group::Install the dependencies of $chart_dir"
+          if ! run prepare_chart "$chart_dir" "$metadata"; then
+            echo "::endgroup::"
+            echo "::error::Could not install the dependencies of $chart_dir, none of its environments was hydrated."
+            failed+=("$chart_dir")
+            continue
+          fi
+          echo "::endgroup::"
+          chart_name=$(jq -r '.name' "$metadata")
+          release_name=$(jq -r '."release-name"' "$metadata")
+          namespace=$(jq -r '.namespace' "$metadata")
+          # yq extracts the keys of the `environments` map. explode(.) resolves
+          # YAML anchors and aliases before querying, because helm-config.yaml
+          # commonly shares environment definitions via anchors.
+          while IFS= read -r environment; do
+            source="hydrated-$chart_name-$environment"
+            echo "::group::Hydrate $chart_name for $environment"
+            if run render_environment "$chart_dir" "$release_name" "$namespace" "$OUTPUT_ROOT/$source" "$environment"; then
+              echo "::endgroup::"
+              jq -c --arg env "$environment" --arg source "$source" \
+                '. + {env: $env, source: $source, branch: ("hydration-pull-request/" + $env + ."branch-suffix" + "-" + .version)}' \
+                "$metadata" >> "$PAIRS_FILE"
+            else
+              echo "::endgroup::"
+              echo "::error::Could not hydrate $chart_dir for $environment."
+              rm -rf "${OUTPUT_ROOT:?}/$source"
+              failed+=("$chart_dir ($environment)")
+            fi
+          done < <(yq -r 'explode(.) | .environments | keys | .[]' "$chart_dir/helm-config.yaml")
+        done < "$CHART_LIST"
+
+        hydrated=false
+        if [ -s "$PAIRS_FILE" ]; then
+          hydrated=true
+        fi
+        echo "hydrated=$hydrated" >> "$GITHUB_OUTPUT"
+        echo "Hydrated $(wc -l < "$PAIRS_FILE") chart/environment pair(s)."
+        if [ "${#failed[@]}" -gt 0 ]; then
+          printf '::error::Hydration failed for %s\n' "${failed[@]}"
           exit 1
         fi
-        if [[ -z "$NAMESPACE" ]]; then
-          echo "Error: namespace is required in $CONFIG" >&2
-          exit 1
-        fi
-        APIS=$(hydration=$HYDRATION yq 'explode(.) | (.environments.[env(hydration)].apis // []) | @csv' "$CONFIG")
-        # Value file paths are declared relative to the chart, so they are
-        # prefixed with the chart directory before being handed to helm.
-        VALUE_FILES=$(hydration=$HYDRATION chart_dir=$CHART_DIR yq 'explode(.) | (.environments.[env(hydration)].valueFiles // []) | map(env(chart_dir) + "/" + .) | @csv' "$CONFIG")
-        HELM_ARGS=()
-        if [[ -n "$APIS" ]]; then
-          HELM_ARGS+=(-a "$APIS")
-        fi
-        if [[ -n "$VALUE_FILES" ]]; then
-          HELM_ARGS+=(-f "$VALUE_FILES")
-        fi
-        # Render templates to a temporary directory to avoid committing
-        # intermediate files before post-processing is complete.
-        helm template "$RELEASE_NAME" "$CHART_DIR" \
-          "${HELM_ARGS[@]}" \
-          -n "$NAMESPACE" \
-          --output-dir "${RUNNER_TEMP}/hydrated-manifests" \
-          --include-crds \
-          --release-name \
-          --skip-tests
-        # Post-process all rendered YAML manifests to inject ArgoCD annotations
-        # required for reliable CRD management via server-side apply.
-        #
-        # Why server-side apply for CRDs?
-        #   CRD manifests often carry large `last-applied-configuration` annotations
-        #   that exceed the 256 KiB annotation size limit enforced by Kubernetes.
-        #   Using ServerSideApply=true tells ArgoCD to apply them with server-side
-        #   apply (SSA), which avoids storing the full manifest in annotations.
-        #
-        # Why sync-wave "-1"?
-        #   Setting the sync-wave to -1 ensures CRDs are applied before all other
-        #   resources (wave 0 and above), so that custom resources that depend on
-        #   them are never applied before their CRD exists in the cluster.
-        #
-        # The yq expression handles three cases for each CRD manifest:
-        #   1. No sync-options annotation at all → create it with "ServerSideApply=true".
-        #   2. sync-options annotation exists but does not contain "ServerSideApply=" →
-        #      append ",ServerSideApply=true" to the existing value.
-        #   3. No sync-wave annotation → create it with "-1".
-        #      (If sync-wave is already set it is left unchanged.)
-        find "${RUNNER_TEMP}/hydrated-manifests" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec yq -i '
-          select(.kind == "CustomResourceDefinition" and
-            .metadata.annotations["argocd.argoproj.io/sync-options"] == null)
-            .metadata.annotations["argocd.argoproj.io/sync-options"] = "ServerSideApply=true" |
-          select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-options"] != null and
-            (.metadata.annotations["argocd.argoproj.io/sync-options"] |
-            contains("ServerSideApply=") | not))
-            .metadata.annotations["argocd.argoproj.io/sync-options"] |= . + ",ServerSideApply=true" |
-          select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
-            .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
-        ' {} \;
-    - name: Switch to the environment branch
-      # The environment branch is guaranteed to exist by the
-      # prepare-environment-branches job. The actions/checkout step only fetches
-      # the default branch, so an explicit fetch is required before switching.
-      if: ${{ inputs.create-pull-request }}
+    - name: Prepare environment branches
+      # Ensures the `environments/<name>` branch exists on origin before any
+      # chart is hydrated into it, creating it as an orphan branch on first use,
+      # and gives the environment label a colour.
+      #
+      # Skipped in render-only mode and when running under act, because nothing
+      # is pushed in either case.
+      if: ${{ !cancelled() && steps.hydrate.outputs.hydrated == 'true' && inputs.create-pull-request && !env.ACT }}
       env:
-        BRANCH: environments/${{ matrix.entry.env }}
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        ACTOR: ${{ github.actor }}
+        ACTOR_ID: ${{ github.actor_id }}
       run: |
         set -euo pipefail
-        git fetch origin "$BRANCH"
-        git switch "$BRANCH"
+
+        # Gives the "env: <name>" label a colour before any pull request carries
+        # it. Without this GitHub creates the label implicitly, the first time it
+        # is applied, in a random colour — which defeats the point of colouring
+        # the environment in the first place.
+        #
+        # The tier chooses the colour family and a hash of the full name chooses
+        # the shade within it, so that "is this production" is answerable from
+        # the colour alone while sibling clusters of the same tier stay apart.
+        #
+        # The tier is read from the name's segments rather than from the whole
+        # name, because an environment is commonly named after its cluster with
+        # the tier as one part of it — sf-k8s01-prod is a production environment
+        # and sf-k8s02-dev is not, and matching the whole name recognises
+        # neither. Segments also stop "sf-devops" from being read as a
+        # development tier, which a plain substring match would.
+        #
+        # Where several tiers appear in one name the most severe wins, so
+        # nothing that mentions production is coloured as though it were not.
+        #
+        # An existing label is left alone. A repository that recoloured it on
+        # purpose should not have that reverted on the next hydration run.
+        ensure_label() {
+          local environment=$1
+          local label="env: $environment"
+
+          # tr -cs collapses every run of non-alphanumeric characters into one
+          # space, so sf-k8s01-prod becomes the segments "sf k8s01 prod".
+          local segments segment rank=0
+          segments=$(printf '%s' "$environment" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ')
+          for segment in $segments; do
+            case "$segment" in
+              prod|prod[0-9]*|production|live|prd)  if [ "$rank" -lt 5 ]; then rank=5; fi ;;
+              stage|staging|stg|preprod|uat)        if [ "$rank" -lt 4 ]; then rank=4; fi ;;
+              test|test[0-9]*|testing|qa|int)       if [ "$rank" -lt 3 ]; then rank=3; fi ;;
+              dev|dev[0-9]*|develop|development)    if [ "$rank" -lt 2 ]; then rank=2; fi ;;
+              local|localhost|sandbox|demo|kind|minikube)
+                                                    if [ "$rank" -lt 1 ]; then rank=1; fi ;;
+            esac
+          done
+
+          local family
+          case "$rank" in
+            5) family=(b60205 d73a4a cf222e a40e26 e5534b 8e1519) ;;  # production, red
+            4) family=(d93f0b e36209 bf5b04 c2410c ea7317 fb8500) ;;  # staging, orange
+            3) family=(1d76db 0052cc 218bff 0366d6 0a3069 4184e4) ;;  # test, blue
+            2) family=(0e8a16 2ea043 1a7f37 3fb950 116329 57ab5a) ;;  # development, green
+            1) family=(6e7781 57606a 424a53 8c959f 795548 4d5358) ;;  # throwaway, grey
+            *) family=(5319e7 006b75 8250df bf3989 9a6700 1b7c83) ;;  # unrecognised
+          esac
+
+          # Sibling environments of one tier usually differ only by a number, so
+          # the number picks the shade where there is one: consecutive clusters
+          # then get consecutive shades and cannot collide, which a hash of names
+          # differing in one character regularly does. 10# forces base ten, or a
+          # zero padded 08 would be read as an invalid octal literal. Only the
+          # last six digits are used, so a name carrying a date cannot overflow.
+          #
+          # Names with no number fall back to a hash of the name, which is stable
+          # for a given name across every run and every repository.
+          local digits index colour error
+          digits=$(printf '%s' "$environment" | tr -cd '0-9' | tail -c 6)
+          if [ -n "$digits" ]; then
+            index=$(( 10#$digits % ${#family[@]} ))
+          else
+            index=$(( 0x$(printf '%s' "$environment" | sha256sum | cut -c1-4) % ${#family[@]} ))
+          fi
+          colour=${family[$index]}
+
+          if error=$(gh label create "$label" \
+                --color "$colour" \
+                --description "Hydrated manifests for the $environment environment" 2>&1); then
+            echo "Created label '$label' in #$colour."
+          elif printf '%s' "$error" | grep -q "already exists"; then
+            echo "Label '$label' already exists, leaving its colour alone."
+          else
+            # Most likely the calling workflow does not grant issues: write. The
+            # label is still applied to the pull request, so this is not fatal.
+            echo "::warning::could not create the label '$label': $error"
+          fi
+        }
+
+        # A git identity must be set for the initial commit because the GitHub
+        # Actions runner has no global git user set by default.
+        # github.actor_id and github.actor are built-in context variables, so
+        # no API call is needed to construct the standard GitHub noreply address
+        # (<id>+<login>@users.noreply.github.com).
+        export GIT_AUTHOR_NAME="$ACTOR" GIT_COMMITTER_NAME="$ACTOR"
+        export GIT_AUTHOR_EMAIL="${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
+        export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+        # An orphan commit with an empty tree gives the hydrated manifests a
+        # clean history separate from the branch the chart sources live on. It
+        # is written with plumbing commands, so the checkout stays untouched.
+        empty_tree=$(git mktree < /dev/null)
+
+        while IFS= read -r environment; do
+          branch="environments/$environment"
+          if git ls-remote --exit-code origin "refs/heads/$branch" > /dev/null 2>&1; then
+            echo "Branch '$branch' already exists on origin."
+          else
+            commit=$(git commit-tree "$empty_tree" -m "chore: initialise $branch branch")
+            # A concurrent run may have created the branch in the meantime,
+            # which rejects this push but leaves the branch in place.
+            if ! git push origin "$commit:refs/heads/$branch" \
+                && ! git ls-remote --exit-code origin "refs/heads/$branch" > /dev/null 2>&1; then
+              echo "::error::Could not create the branch '$branch'."
+              exit 1
+            fi
+          fi
+          ensure_label "$environment"
+        done < <(jq -r '.env' "$PAIRS_FILE" | sort -u)
+    - name: Select pull requests
+      # Keeps the chart/environment pairs whose rendered manifests differ from
+      # what is already proposed or deployed, so that only those start a
+      # pull-request job:
+      #   • With an open pull request for the pair's branch, the manifests are
+      #     compared against that branch. The pull request is also refreshed when
+      #     its branch no longer builds on the tip of the environment branch.
+      #   • Without one, they are compared against the environment branch.
+      #
+      # The comparison is between git tree hashes, computed for the rendered
+      # directory with a throwaway index, so no file is copied or checked out.
+      #
+      # All remote state is gathered up front: one API call lists the open
+      # pull requests and one fetch brings in every environment branch and
+      # every open pull request branch. The per-pair comparison then runs
+      # locally, so its cost does not grow with the number of round-trips.
+      id: select
+      if: ${{ !cancelled() && steps.hydrate.outputs.hydrated == 'true' && inputs.create-pull-request && !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        git_dir=$(git rev-parse --absolute-git-dir)
+        index="$RUNNER_TEMP/compare.index"
+
+        # Prints the git tree hash of a directory. -f includes files a
+        # .gitignore would exclude, so nothing rendered is silently left out of
+        # the comparison.
+        tree_of() {
+          rm -f "$index"
+          GIT_INDEX_FILE=$index git -C "$1" --git-dir="$git_dir" --work-tree="$1" add -A -f .
+          GIT_INDEX_FILE=$index git --git-dir="$git_dir" write-tree
+          rm -f "$index"
+        }
+
+        # Open hydration pull requests, keyed by their head branch, with the
+        # branch they target as the value. Only pull requests whose head is
+        # the branch of a hydrated pair are kept.
+        declare -A open_prs=()
+        while IFS=$'\t' read -r head base; do
+          open_prs[$head]=$base
+        done < <(gh pr list --state open --limit 1000 --json headRefName,baseRefName \
+          | jq -r --slurpfile pairs "$PAIRS_FILE" \
+              '($pairs | map(.branch)) as $branches
+               | .[] | select(.headRefName as $h | $branches | index($h)) | [.headRefName, .baseRefName] | @tsv')
+
+        # One fetch for every environment branch and every open pull request
+        # branch. peter-evans/create-pull-request keeps a pull request branch
+        # one commit ahead of its base, so a short history is enough to find
+        # the base tip in it. Should it not be found, the pull request is
+        # refreshed, which is what every run did before the comparison existed.
+        refspecs=()
+        while IFS= read -r environment; do
+          refspecs+=("+refs/heads/environments/$environment:refs/remotes/origin/environments/$environment")
+        done < <(jq -r '.env' "$PAIRS_FILE" | sort -u)
+        for head in "${!open_prs[@]}"; do
+          refspecs+=("+refs/heads/$head:refs/remotes/origin/$head")
+        done
+        git fetch --quiet --no-tags --depth=10 origin "${refspecs[@]}"
+
+        selected=()
+        while IFS=$'\t' read -r environment name branch manifest_dir source; do
+          base="environments/$environment"
+          reference="refs/remotes/origin/$base"
+          if [ "${open_prs[$branch]:-}" = "$base" ]; then
+            reference="refs/remotes/origin/$branch"
+            if ! git merge-base --is-ancestor "refs/remotes/origin/$base" "$reference"; then
+              echo "$name/$environment: the open pull request does not build on $base, refreshing it."
+              selected+=("$source")
+              continue
+            fi
+          fi
+          rendered=$(tree_of "$OUTPUT_ROOT/$source")
+          current=$(git rev-parse --verify --quiet "$reference:$manifest_dir" || true)
+          if [ "$rendered" = "$current" ]; then
+            echo "$name/$environment: unchanged against ${reference#refs/remotes/origin/}, skipping."
+          else
+            echo "$name/$environment: changed against ${reference#refs/remotes/origin/}."
+            selected+=("$source")
+          fi
+        done < <(jq -r '[.env, .name, .branch, ."manifest-dir", .source] | @tsv' "$PAIRS_FILE")
+
+        # The source directory is unique per chart and environment, so it
+        # identifies the selected pairs.
+        keep=$(printf '%s\n' "${selected[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+        pull_requests=$(jq -sc --argjson keep "$keep" \
+          '[.[] | select(.source as $s | $keep | index($s)) | {env, name, source, branch, version, "manifest-dir"}]' \
+          "$PAIRS_FILE")
+        echo "pull-requests=$pull_requests" >> "$GITHUB_OUTPUT"
+        echo "${#selected[@]} pair(s) need a pull request."
+    - name: Upload hydrated manifests
+      # Publishes the rendered manifests for the pull-request jobs below and,
+      # when `upload-artifact` is enabled, for the calling workflow. An artifact
+      # that only serves the pull-request jobs is kept for one day.
+      if: ${{ !cancelled() && steps.hydrate.outputs.hydrated == 'true' && (inputs.upload-artifact || (steps.select.outputs.pull-requests != '' && steps.select.outputs.pull-requests != '[]')) }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.discover.outputs.artifact }}
+        path: ${{ runner.temp }}/hydrated/
+        if-no-files-found: error
+        retention-days: ${{ !inputs.upload-artifact && 1 || '' }}
+
+  # ---------------------------------------------------------------------------
+  # Job: create-pull-request
+  # Runs once per chart and environment whose manifests changed, as selected by
+  # the `hydrate` job, and opens (or updates) a pull request against the
+  # environment branch so the GitOps agent (e.g. ArgoCD) can pick up the new
+  # manifests. It needs no Helm: the manifests come from the artifact.
+  #
+  # It still runs when `hydrate` failed for some other chart, so a broken chart
+  # does not hold back the pull requests of the charts that did render.
+  #
+  # Matrix variable:
+  #   entry.name           – the chart name, e.g. "loki"
+  #   entry.env            – the environment name, e.g. "dev"
+  #   entry.manifest-dir   – the chart's directory on the environment branch
+  #   entry.source         – the pair's directory inside the artifact
+  #   entry.branch         – the pull request's source branch
+  #   entry.version        – the version reported in the title
+  # ---------------------------------------------------------------------------
+  create-pull-request:
+    runs-on: ubuntu-latest
+    needs:
+    - hydrate
+    if: ${{ !cancelled() && inputs.create-pull-request && needs.hydrate.outputs.pull-requests != '' && needs.hydrate.outputs.pull-requests != '[]' }}
+    # Permissions required by the `Create pull request` step:
+    #   contents: write       – push the hydrated-manifests source branch.
+    #   pull-requests: write  – open / update the PR against the environment branch.
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      # fail-fast is set to false so that a failing pull request does not
+      # cancel its siblings.
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJSON(needs.hydrate.outputs.pull-requests) }}
+    steps:
+    - name: Checkout the environment branch
+      # The environment branch is guaranteed to exist by the hydrate job.
+      uses: actions/checkout@v7
+      with:
+        ref: environments/${{ matrix.entry.env }}
+    - name: Download hydrated manifests
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ needs.hydrate.outputs.artifact }}
+        path: ${{ runner.temp }}/hydrated
     - name: Collect manifests
-      # Moves the rendered manifests from the temporary output directory into
-      # the working directory.
+      # Moves the rendered manifests of this chart and environment into the
+      # working directory.
       env:
-        MANIFEST_DIR: ${{ steps.chart.outputs.manifest-dir }}
+        MANIFEST_DIR: ${{ matrix.entry.manifest-dir }}
+        SOURCE: ${{ matrix.entry.source }}
       run: |
         set -euo pipefail
         # Remove the output of a previous run for this chart only, so that
         # sibling charts sharing the branch keep their manifests.
         rm -rf "${MANIFEST_DIR:?}"
         mkdir -p "$MANIFEST_DIR"
-        mv -v "${RUNNER_TEMP}/hydrated-manifests"/* "$MANIFEST_DIR/"
-    - name: Stage manifests
-      # Stages the rendered manifests so that peter-evans/create-pull-request
-      # picks them up as the commit content for the hydration PR.
-      if: ${{ inputs.create-pull-request }}
-      env:
-        MANIFEST_DIR: ${{ steps.chart.outputs.manifest-dir }}
-      run: |
-        set -euo pipefail
-        git add "$MANIFEST_DIR"
-        # Remove untracked files left behind by helm dependency build (e.g.
-        # downloaded chart archives) so the working tree is clean before the PR
-        # action runs. -f (force) is required because Git refuses to remove files
-        # without it, -d extends this to directories. Staged manifests are kept.
-        git clean -fd -e "$MANIFEST_DIR"
-        # Prints the current git status to the job log for debugging purposes.
-        # Useful for verifying which files were staged by `git add` and confirming
-        # that the hydrated manifests are ready to be committed.
+        mv -v "${RUNNER_TEMP}/hydrated/$SOURCE"/* "$MANIFEST_DIR/"
         git status
-    - name: Upload hydrated manifests
-      # Publishes the rendered manifests so that a calling workflow can inspect
-      # or compare them without going through an environment branch.
-      if: ${{ inputs.upload-artifact }}
-      uses: actions/upload-artifact@v7
-      with:
-        name: hydrated-${{ steps.chart.outputs.name }}-${{ matrix.entry.env }}
-        path: ${{ steps.chart.outputs.manifest-dir }}/
-        if-no-files-found: error
     - name: Create pull request
       # Opens (or updates) one pull request per chart and environment with the
       # freshly rendered manifests.
       #
       # Condition:
-      #   inputs.create-pull-request – Skips this step in render-only mode.
       #   if: ${{ !env.ACT }}  – Skips this step when the workflow is executed
       #                          locally with `act` (https://github.com/nektos/act).
       #                          The `ACT` environment variable is set automatically
@@ -623,25 +796,25 @@ jobs:
       #   labels  – Labels applied to the PR for filtering and automation rules,
       #             including "env: <name>" so the environment is visible in the
       #             pull request list without reading the title. Its colour is
-      #             set once per environment by prepare-environment-branches.
+      #             set once per environment by the hydrate job.
       #   title   – PR title, prefixed with the 💧 emoji for immediate recognition
       #             and including the subchart version for at-a-glance traceability
       #             in the pull-request list.
-      if: ${{ inputs.create-pull-request && !env.ACT }}
+      if: ${{ !env.ACT }}
       uses: peter-evans/create-pull-request@v8.1.1
       with:
         # Only include this chart's hydrated manifests in the PR, not any other
-        # changes that may be present in the source branch.
+        # changes that may be present in the working tree.
         add-paths: |
-          ${{ steps.chart.outputs.manifest-dir }}/
+          ${{ matrix.entry.manifest-dir }}/
         # Target branch: one long-lived branch per environment holds the latest
         # hydrated state and is watched by the GitOps agent (e.g. ArgoCD).
         base: environments/${{ matrix.entry.env }}
         # Source branch: includes the subchart version so that parallel PRs for
         # different chart versions never overwrite each other's branch.
-        branch: hydration-pull-request/${{ matrix.entry.env }}${{ steps.chart.outputs.branch-suffix }}-${{ steps.chart.outputs.version }}
+        branch: ${{ matrix.entry.branch }}
         labels: |
           hydration
           automated pr
           env: ${{ matrix.entry.env }}
-        title: 💧 [${{ matrix.entry.env }}] Hydrated manifests for ${{ steps.chart.outputs.name }} subchart version ${{ steps.chart.outputs.version }}
+        title: 💧 [${{ matrix.entry.env }}] Hydrated manifests for ${{ matrix.entry.name }} subchart version ${{ matrix.entry.version }}
