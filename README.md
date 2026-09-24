@@ -266,7 +266,7 @@ All charts are tested by one job:
 3. For each chart: runs `helm dependency update` to resolve the chart dependencies, then `helm unittest`.
 4. Publishes the JUnit test results of all charts as one summary to the GitHub Actions UI.
 5. Runs `helm lint` for each chart.
-6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
+6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts one success or failure Adaptive Card for all charts to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
 
 A chart whose tests or lint fail does not stop the others. The job fails once
 every chart ran.

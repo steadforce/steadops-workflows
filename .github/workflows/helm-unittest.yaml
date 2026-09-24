@@ -94,6 +94,7 @@ jobs:
     - name: Discover charts with tests
       # Finds every chart that has tests. A chart without a tests directory is
       # skipped rather than failing, so charts can adopt tests one at a time.
+      id: discover
       env:
         CHARTS_ROOT: ${{ inputs.charts-root }}
         DISCOVERY_DEPTH: ${{ inputs.chart-discovery-depth }}
@@ -115,6 +116,8 @@ jobs:
         fi
         echo "Found $(wc -l < "$CHART_LIST") chart(s) with tests:"
         cat "$CHART_LIST"
+        # Named in the Teams notification.
+        echo "charts=$(paste -sd, "$CHART_LIST" | sed 's/,/, /g')" >> "$GITHUB_OUTPUT"
     - name: Set up Helm
       # Installs the Helm CLI at the version requested via the workflow input.
       # Pinning to a specific version (e.g. "v3.19.0") ensures reproducible builds.
@@ -211,15 +214,6 @@ jobs:
         if [ "${#failed[@]}" -gt 0 ]; then
           exit 1
         fi
-    - name: Helm validation and helm unittests succeeded
-      # Sends a success notification to MS Teams on Renovate branches so the
-      # team can quickly approve automated dependency-update PRs with confidence.
-      # Only runs on branches matching `renovate/` and not when using `act`.
-      if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
-      uses: jdcargile/ms-teams-notification@v1.4
-      env:
-        CHART_DIR: ${{ matrix.chart }}
-      run: helm lint "$CHART_DIR"
     - name: Notify MS Teams
       # Posts the result to MS Teams on Renovate branches, so the team can
       # approve automated dependency-update PRs with confidence, or is alerted
@@ -237,4 +231,4 @@ jobs:
         status: ${{ job.status }}
         title: ${{ job.status == 'success' && '✅ Helm validation and helm unittests succeeded!' || '🚢 Helm validation or helm unittests failed!!!' }}
         facts: |
-          Chart=${{ matrix.chart }}
+          Charts=${{ steps.discover.outputs.charts }}
