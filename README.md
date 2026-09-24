@@ -223,7 +223,7 @@ The helm unittest workflow bundles helm unittest and helm linting.
 
 | Secret | Description | Required |
 |---|---|---|
-| `steadops-helm-renovation-ms-teams-webhook` | MS Teams webhook URL used for notifications on Renovate branches. Notifications are skipped when it is not passed | No |
+| `steadops-helm-renovation-ms-teams-webhook` | MS Teams Workflows webhook URL (Adaptive Card; legacy Office 365 connector URLs no longer work) used for notifications on Renovate branches. Notifications are skipped when it is not passed | No |
 
 **Which charts are tested:**
 
@@ -266,7 +266,7 @@ All charts are tested by one job:
 3. For each chart: runs `helm dependency update` to resolve the chart dependencies, then `helm unittest`.
 4. Publishes the JUnit test results of all charts as one summary to the GitHub Actions UI.
 5. Runs `helm lint` for each chart.
-6. On Renovate branches (refs containing `renovate/`), sends one success or failure notification to MS Teams, if the webhook secret was passed.
+6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
 
 A chart whose tests or lint fail does not stop the others. The job fails once
 every chart ran.
@@ -327,6 +327,40 @@ jobs:
 2. Runs Trufflehog over the resolved commit range.
 3. Publishes a results table to the GitHub Actions step summary.
 4. Fails the job if Trufflehog detects any secrets.
+
+---
+
+## MS Teams notification action
+A composite action that posts the result of a job as an Adaptive Card to an MS Teams channel. The workflows of
+this repository use it for their notifications, and it can also be used directly as a step.
+
+The webhook has to be a Teams **Workflows** (Power Automate) webhook, created with the Workflows template
+"Send webhook alerts to a channel", shown as "Post to a channel when a webhook request is received" in some
+tenants. The retired Office 365 connector webhooks no longer work.
+
+**Inputs:**
+
+| Input | Description | Default | Required |
+|---|---|---|---|
+| `webhook-url` | MS Teams Workflows webhook URL | | Yes |
+| `status` | Job status, usually `${{ job.status }}`. `success` is shown green, `failure` red, anything else yellow | | Yes |
+| `title` | Card title | `<workflow name>: <status>` | No |
+| `facts` | Additional facts, one `Name=Value` per line, shown next to repository, branch, commit, actor and time | | No |
+
+**Usage example:**
+```yaml
+    - name: Notify MS Teams
+      if: ${{ !cancelled() }}
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
+      with:
+        webhook-url: ${{ secrets.MS_TEAMS_WEBHOOK }}
+        status: ${{ job.status }}
+        facts: |
+          Environment=production
+```
+
+Inside a reusable workflow, reference the action with its full path as shown above. A local
+`./.github/actions/...` path resolves against the checkout of the calling repository.
 
 ---
 
