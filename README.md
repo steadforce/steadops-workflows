@@ -212,7 +212,7 @@ The helm unittest workflow bundles helm unittest and helm linting.
 
 | Secret | Description | Required |
 |---|---|---|
-| `steadops-helm-renovation-ms-teams-webhook` | MS Teams webhook URL used for notifications on Renovate branches. Notifications are skipped when it is not passed | No |
+| `steadops-helm-renovation-ms-teams-webhook` | MS Teams Workflows webhook URL (Adaptive Card; legacy Office 365 connector URLs no longer work) used for notifications on Renovate branches. Notifications are skipped when it is not passed | No |
 
 **Which charts are tested:**
 
@@ -252,7 +252,7 @@ jobs:
 3. Runs `helm dependency update` to resolve chart dependencies.
 4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
 5. Runs `helm lint` to validate the chart.
-6. On Renovate branches (refs containing `renovate/`), sends a success or failure notification to MS Teams, if the webhook secret was passed.
+6. On Renovate branches (refs containing `renovate/`), posts a success or failure Adaptive Card to MS Teams, if the webhook secret was passed.
 
 ---
 
