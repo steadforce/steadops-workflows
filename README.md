@@ -252,7 +252,7 @@ jobs:
 3. Runs `helm dependency update` to resolve chart dependencies.
 4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
 5. Runs `helm lint` to validate the chart.
-6. On Renovate branches (refs containing `renovate/`), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
+6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
 
 ---
 
