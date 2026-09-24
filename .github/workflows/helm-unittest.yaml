@@ -26,8 +26,11 @@
 #
 # Secrets
 # -------
-#   steadops-helm-renovation-ms-teams-webhook – MS Teams incoming webhook URL.
-#     Optional. Notifications are only sent on branches matching `renovate/`,
+#   steadops-helm-renovation-ms-teams-webhook – MS Teams Workflows webhook URL
+#     (created with the "Send webhook alerts to a channel" Workflows template,
+#     shown as "Post to a channel when a webhook request is received" in some
+#     tenants). Legacy Office 365 connector URLs no longer work.
+#     Optional. Notifications are only sent on branches starting with `renovate/`,
 #     and are skipped entirely when the secret is not passed.
 #
 # Expected repository layout
@@ -183,28 +186,21 @@ jobs:
       env:
         CHART_DIR: ${{ matrix.chart }}
       run: helm lint "$CHART_DIR"
-    - name: Helm validation and helm unittests succeeded
-      # Sends a success notification to MS Teams on Renovate branches so the
-      # team can quickly approve automated dependency-update PRs with confidence.
-      # Only runs on branches matching `renovate/` and not when using `act`.
-      if: ${{ success() && contains( github.ref, 'renovate/' ) && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
-      uses: jdcargile/ms-teams-notification@v1.4
+    - name: Notify MS Teams
+      # Posts the result to MS Teams on Renovate branches, so the team can
+      # approve automated dependency-update PRs with confidence, or is alerted
+      # right away that an update broke the chart and must not be merged.
+      # Only runs on branches starting with `renovate/`, when the webhook secret
+      # was passed, and not when using `act`. On pull requests github.ref is
+      # refs/pull/<number>/merge, so the branch is taken from github.head_ref,
+      # falling back to github.ref_name on push.
+      # Referenced with its full path: a local path would resolve against the
+      # checkout of the calling repository.
+      if: ${{ (success() || failure()) && startsWith(github.head_ref || github.ref_name, 'renovate/') && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
       with:
-        github-token: ${{ github.token }}
-        ms-teams-webhook-uri: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
-        notification-summary: "&#x2705; Helm validation and helm unittests succeeded!"
-        notification-color: 28a745
-        timezone: Europe/Berlin
-    - name: Helm validation or helm unittests failed
-      # Sends a failure notification to MS Teams on Renovate branches so the
-      # team is immediately alerted that an automated dependency update broke
-      # the chart and the PR should not be merged.
-      # Only runs on branches matching `renovate/` and not when using `act`.
-      if: ${{ failure() && contains( github.ref, 'renovate/' ) && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
-      uses: jdcargile/ms-teams-notification@v1.4
-      with:
-        github-token: ${{ github.token }}
-        ms-teams-webhook-uri: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
-        notification-summary: "&#x1F6A2; Helm validation or helm unittests failed!!!"
-        notification-color: dc3545
-        timezone: Europe/Berlin
+        webhook-url: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+        status: ${{ job.status }}
+        title: ${{ job.status == 'success' && '✅ Helm validation and helm unittests succeeded!' || '🚢 Helm validation or helm unittests failed!!!' }}
+        facts: |
+          Chart=${{ matrix.chart }}
