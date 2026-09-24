@@ -252,7 +252,7 @@ jobs:
 3. Runs `helm dependency update` to resolve chart dependencies.
 4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
 5. Runs `helm lint` to validate the chart.
-6. On Renovate branches (refs containing `renovate/`), posts a success or failure Adaptive Card to MS Teams, if the webhook secret was passed.
+6. On Renovate branches (refs containing `renovate/`), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
 
 ---
 
@@ -310,6 +310,39 @@ jobs:
 2. Runs Trufflehog over the resolved commit range.
 3. Publishes a results table to the GitHub Actions step summary.
 4. Fails the job if Trufflehog detects any secrets.
+
+---
+
+## MS Teams notification action
+A composite action that posts the result of a job as an Adaptive Card to an MS Teams channel. The workflows of
+this repository use it for their notifications, and it can also be used directly as a step.
+
+The webhook has to be a Teams **Workflows** (Power Automate) webhook, created with the Workflows template
+"Send webhook alerts to a channel". The retired Office 365 connector webhooks no longer work.
+
+**Inputs:**
+
+| Input | Description | Default | Required |
+|---|---|---|---|
+| `webhook-url` | MS Teams Workflows webhook URL | | Yes |
+| `status` | Job status, usually `${{ job.status }}`. `success` is shown green, `failure` red, anything else yellow | | Yes |
+| `title` | Card title | `<workflow name>: <status>` | No |
+| `facts` | Additional facts, one `Name=Value` per line, shown next to repository, branch, commit, actor and time | | No |
+
+**Usage example:**
+```yaml
+    - name: Notify MS Teams
+      if: ${{ !cancelled() }}
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
+      with:
+        webhook-url: ${{ secrets.MS_TEAMS_WEBHOOK }}
+        status: ${{ job.status }}
+        facts: |
+          Environment=production
+```
+
+Inside a reusable workflow, reference the action with its full path as shown above. A local
+`./.github/actions/...` path resolves against the checkout of the calling repository.
 
 ---
 

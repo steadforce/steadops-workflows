@@ -191,72 +191,13 @@ jobs:
       # right away that an update broke the chart and must not be merged.
       # Only runs on branches matching `renovate/`, when the webhook secret was
       # passed, and not when using `act`.
-      # The webhook has to be a Teams Workflows (Power Automate) webhook, which
-      # takes an Adaptive Card. The retired Office 365 connector webhooks and
-      # their MessageCard payload are no longer supported.
+      # Referenced with its full path: a local path would resolve against the
+      # checkout of the calling repository.
       if: ${{ (success() || failure()) && contains(github.ref, 'renovate/') && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
-      env:
-        JOB_STATUS: ${{ job.status }}
-        CHART_DIR: ${{ matrix.chart }}
-        REPOSITORY: ${{ github.repository }}
-        REF_NAME: ${{ github.head_ref || github.ref_name }}
-        SHA: ${{ github.sha }}
-        ACTOR: ${{ github.actor }}
-        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
-      run: |
-        set -euo pipefail
-        if [ "$JOB_STATUS" = "success" ]; then
-          title="✅ Helm validation and helm unittests succeeded!"
-          style="good"
-        else
-          title="🚢 Helm validation or helm unittests failed!!!"
-          style="attention"
-        fi
-        timestamp=$(TZ=Europe/Berlin date '+%Y-%m-%d %H:%M:%S %Z')
-        payload=$(jq -n \
-          --arg title "$title" \
-          --arg style "$style" \
-          --arg repository "$REPOSITORY" \
-          --arg ref "$REF_NAME" \
-          --arg chart "$CHART_DIR" \
-          --arg sha "${SHA:0:7}" \
-          --arg actor "$ACTOR" \
-          --arg timestamp "$timestamp" \
-          --arg url "$RUN_URL" \
-          '{
-            type: "message",
-            attachments: [{
-              contentType: "application/vnd.microsoft.card.adaptive",
-              contentUrl: null,
-              content: {
-                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                type: "AdaptiveCard",
-                version: "1.4",
-                msteams: { width: "Full" },
-                body: [
-                  {
-                    type: "Container",
-                    style: $style,
-                    bleed: true,
-                    items: [{ type: "TextBlock", text: $title, weight: "Bolder", size: "Medium", wrap: true }]
-                  },
-                  {
-                    type: "FactSet",
-                    facts: [
-                      { title: "Repository", value: $repository },
-                      { title: "Branch", value: $ref },
-                      { title: "Chart", value: $chart },
-                      { title: "Commit", value: $sha },
-                      { title: "Triggered by", value: $actor },
-                      { title: "Time", value: $timestamp }
-                    ]
-                  }
-                ],
-                actions: [{ type: "Action.OpenUrl", title: "View workflow run", url: $url }]
-              }
-            }]
-          }')
-        curl --fail-with-body --silent --show-error --retry 3 \
-          -H 'Content-Type: application/json' \
-          -d "$payload" \
-          "$MS_TEAMS_WEBHOOK"
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
+      with:
+        webhook-url: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+        status: ${{ job.status }}
+        title: ${{ job.status == 'success' && '✅ Helm validation and helm unittests succeeded!' || '🚢 Helm validation or helm unittests failed!!!' }}
+        facts: |
+          Chart=${{ matrix.chart }}

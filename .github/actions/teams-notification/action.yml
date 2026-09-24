@@ -1,0 +1,118 @@
+# MS Teams notification
+#
+# Posts the result of a job as an Adaptive Card to an MS Teams channel.
+#
+# Purpose
+# -------
+# Shared by the workflows of this repository, so every notification looks the
+# same and the payload only has to be maintained in one place.
+#
+# The webhook has to be a Teams Workflows (Power Automate) webhook, created
+# with the "Send webhook alerts to a channel" Workflows template. The retired
+# Office 365 connector webhooks and their MessageCard payload are no longer
+# supported.
+#
+# Usage
+# -----
+# Reusable workflows must reference this action with its full path, e.g.
+# `steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0`.
+# A local `./.github/actions/...` path resolves against the checkout of the
+# calling repository, not this one.
+
+name: MS Teams notification
+description: Post the result of a job as an Adaptive Card to an MS Teams Workflows webhook.
+
+inputs:
+  webhook-url:
+    description: "MS Teams Workflows webhook URL."
+    required: true
+  status:
+    description: "Job status, usually job.status. Selects the card colour: success, failure or anything else (warning)."
+    required: true
+  title:
+    description: "Card title. Defaults to the workflow name and the status."
+    required: false
+    default: ""
+  facts:
+    description: "Additional facts, one `Name=Value` per line, shown after the repository and branch."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+  - name: Post Adaptive Card
+    shell: bash
+    env:
+      WEBHOOK_URL: ${{ inputs.webhook-url }}
+      STATUS: ${{ inputs.status }}
+      TITLE: ${{ inputs.title }}
+      FACTS: ${{ inputs.facts }}
+      WORKFLOW: ${{ github.workflow }}
+      REPOSITORY: ${{ github.repository }}
+      REF_NAME: ${{ github.head_ref || github.ref_name }}
+      SHA: ${{ github.sha }}
+      ACTOR: ${{ github.actor }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+    run: |
+      set -euo pipefail
+      case "$STATUS" in
+        success) style="good" ;;
+        failure) style="attention" ;;
+        *) style="warning" ;;
+      esac
+      title="${TITLE:-$WORKFLOW: $STATUS}"
+      timestamp=$(TZ=Europe/Berlin date '+%Y-%m-%d %H:%M:%S %Z')
+      # Extra facts are split at the first "=", lines without one are ignored.
+      payload=$(jq -n \
+        --arg title "$title" \
+        --arg style "$style" \
+        --arg repository "$REPOSITORY" \
+        --arg ref "$REF_NAME" \
+        --arg facts "$FACTS" \
+        --arg sha "${SHA:0:7}" \
+        --arg actor "$ACTOR" \
+        --arg timestamp "$timestamp" \
+        --arg url "$RUN_URL" \
+        '{
+          type: "message",
+          attachments: [{
+            contentType: "application/vnd.microsoft.card.adaptive",
+            contentUrl: null,
+            content: {
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              type: "AdaptiveCard",
+              version: "1.4",
+              msteams: { width: "Full" },
+              body: [
+                {
+                  type: "Container",
+                  style: $style,
+                  bleed: true,
+                  items: [{ type: "TextBlock", text: $title, weight: "Bolder", size: "Medium", wrap: true }]
+                },
+                {
+                  type: "FactSet",
+                  facts: (
+                    [
+                      { title: "Repository", value: $repository },
+                      { title: "Branch", value: $ref }
+                    ]
+                    + ($facts | split("\n") | map(select(contains("="))
+                        | index("=") as $i | { title: .[:$i], value: .[$i + 1:] }))
+                    + [
+                      { title: "Commit", value: $sha },
+                      { title: "Triggered by", value: $actor },
+                      { title: "Time", value: $timestamp }
+                    ]
+                  )
+                }
+              ],
+              actions: [{ type: "Action.OpenUrl", title: "View workflow run", url: $url }]
+            }
+          }]
+        }')
+      curl --fail-with-body --silent --show-error --retry 3 \
+        -H 'Content-Type: application/json' \
+        -d "$payload" \
+        "$WEBHOOK_URL"
