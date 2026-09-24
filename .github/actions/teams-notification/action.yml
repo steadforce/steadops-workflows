@@ -8,9 +8,10 @@
 # same and the payload only has to be maintained in one place.
 #
 # The webhook has to be a Teams Workflows (Power Automate) webhook, created
-# with the "Send webhook alerts to a channel" Workflows template. The retired
-# Office 365 connector webhooks and their MessageCard payload are no longer
-# supported.
+# with the "Send webhook alerts to a channel" Workflows template, shown as
+# "Post to a channel when a webhook request is received" in some tenants. The
+# retired Office 365 connector webhooks and their MessageCard payload are no
+# longer supported.
 #
 # Usage
 # -----

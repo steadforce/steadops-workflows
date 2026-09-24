@@ -318,7 +318,8 @@ A composite action that posts the result of a job as an Adaptive Card to an MS T
 this repository use it for their notifications, and it can also be used directly as a step.
 
 The webhook has to be a Teams **Workflows** (Power Automate) webhook, created with the Workflows template
-"Send webhook alerts to a channel". The retired Office 365 connector webhooks no longer work.
+"Send webhook alerts to a channel", shown as "Post to a channel when a webhook request is received" in some
+tenants. The retired Office 365 connector webhooks no longer work.
 
 **Inputs:**
 

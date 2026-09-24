@@ -27,8 +27,9 @@
 # Secrets
 # -------
 #   steadops-helm-renovation-ms-teams-webhook – MS Teams Workflows webhook URL
-#     (created with the "Post to a channel when a webhook request is received"
-#     Workflows template). Legacy Office 365 connector URLs no longer work.
+#     (created with the "Send webhook alerts to a channel" Workflows template,
+#     shown as "Post to a channel when a webhook request is received" in some
+#     tenants). Legacy Office 365 connector URLs no longer work.
 #     Optional. Notifications are only sent on branches starting with `renovate/`,
 #     and are skipped entirely when the secret is not passed.
 #
