@@ -43,6 +43,13 @@
 #   Chart.yaml        – Required by `helm dependency update` and `helm lint`.
 #   tests/            – Directory containing helm-unittest test files
 #                       (*.yaml with `suite:` key). Required by `helm unittest`.
+#
+# Job layout
+# ----------
+# All charts are tested by one job. Testing a chart takes seconds, while a job
+# of its own costs a checkout, a Helm installation and a plugin installation,
+# and is billed by the started minute. A chart that fails does not stop the
+# others from being tested; the job fails once all of them ran.
 
 name: Helm unittest CI
 
@@ -74,51 +81,43 @@ on:
         required: false
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job: define-matrix
-  # Finds every chart that has tests. A chart without a tests directory is
-  # skipped rather than failing, so charts can adopt tests one at a time.
-  # ---------------------------------------------------------------------------
-  define-matrix:
+  unittest:
     runs-on: ubuntu-latest
-    outputs:
-      charts: ${{ steps.define.outputs.charts }}
+    env:
+      # Mapped here so a step condition can tell whether the secret was passed;
+      # the secrets context is not available in an `if` expression.
+      MS_TEAMS_WEBHOOK: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+      # One JUnit report per chart, published together by one step.
+      RESULTS_DIR: helm-unittest-results
     steps:
     - uses: actions/checkout@v7
     - name: Discover charts with tests
-      id: define
+      # Finds every chart that has tests. A chart without a tests directory is
+      # skipped rather than failing, so charts can adopt tests one at a time.
+      id: discover
       env:
         CHARTS_ROOT: ${{ inputs.charts-root }}
         DISCOVERY_DEPTH: ${{ inputs.chart-discovery-depth }}
       run: |
         set -euo pipefail
-        charts=$(find "$CHARTS_ROOT" -maxdepth "$DISCOVERY_DEPTH" -type d -name tests -print0 \
+        # The list is shared with the steps below.
+        CHART_LIST="$RUNNER_TEMP/charts.txt"
+        echo "CHART_LIST=$CHART_LIST" >> "$GITHUB_ENV"
+        find "$CHARTS_ROOT" -maxdepth "$DISCOVERY_DEPTH" -type d -name tests -print0 \
           | while IFS= read -r -d '' dir; do
               chart="$(dirname "$dir")"
               if [ -f "$chart/Chart.yaml" ]; then
                 printf '%s\n' "$chart"
               fi
-            done | sort -u | jq -Rsc 'split("\n") | map(select(length > 0))')
-        if [ "$charts" = "[]" ]; then
+            done | sort -u > "$CHART_LIST"
+        if [ ! -s "$CHART_LIST" ]; then
           echo "::error::No directory below '$CHARTS_ROOT' holds both a Chart.yaml and a tests directory."
           exit 1
         fi
-        echo "charts=$charts" >> "$GITHUB_OUTPUT"
-
-  unittest:
-    runs-on: ubuntu-latest
-    needs:
-    - define-matrix
-    strategy:
-      fail-fast: false
-      matrix:
-        chart: ${{ fromJSON(needs.define-matrix.outputs.charts) }}
-    env:
-      # Mapped here so a step condition can tell whether the secret was passed;
-      # the secrets context is not available in an `if` expression.
-      MS_TEAMS_WEBHOOK: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
-    steps:
-    - uses: actions/checkout@v7
+        echo "Found $(wc -l < "$CHART_LIST") chart(s) with tests:"
+        cat "$CHART_LIST"
+        # Named in the Teams notification.
+        echo "charts=$(paste -sd, "$CHART_LIST" | sed 's/,/, /g')" >> "$GITHUB_OUTPUT"
     - name: Set up Helm
       # Installs the Helm CLI at the version requested via the workflow input.
       # Pinning to a specific version (e.g. "v3.19.0") ensures reproducible builds.
@@ -150,27 +149,44 @@ jobs:
             helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
           fi
         fi
-    - name: Update Helm dependencies
-      # Downloads all chart dependencies declared in Chart.yaml into charts/.
-      # Must run before templating or testing to ensure all sub-charts are
-      # present locally.
-      env:
-        CHART_DIR: ${{ matrix.chart }}
-      run: helm dependency update "$CHART_DIR"
     - name: Run Helm unittests
-      # Runs all helm-unittest test suites found in the chart.
+      # Per chart: downloads the dependencies declared in Chart.yaml into
+      # charts/, which must happen first so that all sub-charts are present
+      # locally, and runs all helm-unittest test suites found in the chart.
       # -t JUnit  outputs results in JUnit XML format so they can be picked up
       #           by the Publish Test Results step below.
-      # -o        writes the XML report to test-output.xml in the workspace.
+      # -o        writes the chart's XML report to $RESULTS_DIR.
+      #
+      # errexit is off so that a failing chart does not stop the others from
+      # being tested; the step fails once every chart ran.
+      id: unittest
       env:
-        CHART_DIR: ${{ matrix.chart }}
         WITH_SUBCHART: ${{ inputs.with-subchart }}
       run: |
-        helm unittest --with-subchart="$WITH_SUBCHART" \
-          -t JUnit -o test-output.xml "$CHART_DIR"
+        set -uo pipefail
+        mkdir -p "$RESULTS_DIR"
+        failed=()
+        report=0
+        while IFS= read -r chart; do
+          report=$((report + 1))
+          echo "::group::Test $chart"
+          if helm dependency update "$chart" < /dev/null \
+              && helm unittest --with-subchart="$WITH_SUBCHART" \
+                -t JUnit -o "$RESULTS_DIR/$report.xml" "$chart" < /dev/null; then
+            echo "::endgroup::"
+          else
+            echo "::endgroup::"
+            echo "::error::Helm unittests failed for $chart."
+            failed+=("$chart")
+          fi
+        done < "$CHART_LIST"
+        if [ "${#failed[@]}" -gt 0 ]; then
+          exit 1
+        fi
     - name: Publish Test Results
-      # Parses the JUnit XML report and publishes a test result summary to the
-      # GitHub Actions UI (check run annotations and job summary).
+      # Parses the JUnit XML reports and publishes one test result summary for
+      # all charts to the GitHub Actions UI (check run annotations and job
+      # summary).
       # Skipped when running locally with `act` (!env.ACT) since the GitHub
       # Checks API is unavailable outside of real GitHub Actions.
       # if: !cancelled() ensures results are published even when tests fail,
@@ -179,13 +195,25 @@ jobs:
       if: ${{ !cancelled() && !env.ACT }}
       with:
         files: |
-          test-output.xml
-    - name: Lint Helm chart
+          ${{ env.RESULTS_DIR }}/*.xml
+    - name: Lint Helm charts
       # Runs `helm lint` to validate chart structure, required fields, and
       # template syntax. Fails the job if any linting errors are found.
-      env:
-        CHART_DIR: ${{ matrix.chart }}
-      run: helm lint "$CHART_DIR"
+      # Also runs when tests failed, so the lint findings of every chart are
+      # reported by the same run.
+      if: ${{ !cancelled() && steps.unittest.outcome != 'skipped' }}
+      run: |
+        set -uo pipefail
+        failed=()
+        while IFS= read -r chart; do
+          if ! helm lint "$chart" < /dev/null; then
+            echo "::error::helm lint failed for $chart."
+            failed+=("$chart")
+          fi
+        done < "$CHART_LIST"
+        if [ "${#failed[@]}" -gt 0 ]; then
+          exit 1
+        fi
     - name: Notify MS Teams
       # Posts the result to MS Teams on Renovate branches, so the team can
       # approve automated dependency-update PRs with confidence, or is alerted
@@ -203,4 +231,4 @@ jobs:
         status: ${{ job.status }}
         title: ${{ job.status == 'success' && '✅ Helm validation and helm unittests succeeded!' || '🚢 Helm validation or helm unittests failed!!!' }}
         facts: |
-          Chart=${{ matrix.chart }}
+          Charts=${{ steps.discover.outputs.charts }}
