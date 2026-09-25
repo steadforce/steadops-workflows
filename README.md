@@ -251,7 +251,7 @@ jobs:
 **How it works:**
 1. Finds every chart with a `tests/` directory and builds a job matrix from them.
 2. Installs the requested Helm version and the `helm-unittest` plugin.
-3. Runs `helm dependency update` to resolve chart dependencies.
+3. Installs the chart dependencies: `helm dependency build` when a `Chart.lock` is committed, so the pinned subchart versions are tested, otherwise `helm dependency update` with a warning that the lock file should be committed.
 4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
 5. Runs `helm lint` to validate the chart.
 6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action). Successes go to `steadops-helm-renovation-ms-teams-webhook`, failures to `steadops-helm-renovation-ms-teams-error-webhook`, falling back to the former when no error webhook was passed.

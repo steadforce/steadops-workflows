@@ -47,6 +47,10 @@
 # charts-root and chart-discovery-depth at the directory the charts live in.
 #
 #   Chart.yaml        – Required by `helm dependency update` and `helm lint`.
+#   Chart.lock        – Should be committed. It pins the subchart versions
+#                       that are tested, via `helm dependency build`. Without
+#                       it the versions are resolved with
+#                       `helm dependency update` and the workflow warns.
 #   tests/            – Directory containing helm-unittest test files
 #                       (*.yaml with `suite:` key). Required by `helm unittest`.
 
@@ -159,13 +163,36 @@ jobs:
             helm plugin install --version "$DESIRED_VERSION" "$PLUGIN_URL"
           fi
         fi
-    - name: Update Helm dependencies
+    - name: Build Helm dependencies
       # Downloads all chart dependencies declared in Chart.yaml into charts/.
       # Must run before templating or testing to ensure all sub-charts are
       # present locally.
       env:
         CHART_DIR: ${{ matrix.chart }}
-      run: helm dependency update "$CHART_DIR"
+      run: |
+        set -euo pipefail
+        # `helm dependency build` resolves https repositories against the local
+        # repository list rather than by URL, and a runner starts with none
+        # registered. Every repository the chart declares is added first; oci://
+        # and file:// dependencies need no entry. explode(.) resolves the anchors
+        # Chart.yaml commonly uses for the dependency name.
+        while IFS=$'\t' read -r dep_name dep_url; do
+          case "$dep_url" in
+            ''|oci://*|file://*) continue ;;
+          esac
+          helm repo add "$dep_name" "$dep_url" --force-update > /dev/null
+        done < <(yq -N -r 'explode(.) | .dependencies[]? | [.name, .repository] | @tsv' "$CHART_DIR/Chart.yaml")
+        if [ -f "$CHART_DIR/Chart.lock" ]; then
+          # A committed lock file pins the tested subchart versions, so the
+          # tests run against what the chart will actually ship. This fails
+          # when Chart.lock and Chart.yaml disagree.
+          helm dependency build "$CHART_DIR"
+        else
+          # Without a lock file the versions are resolved from the ranges in
+          # Chart.yaml.
+          echo "::warning::$CHART_DIR/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change the tested chart without a commit. Run 'helm dependency update' and commit the lock file."
+          helm dependency update "$CHART_DIR"
+        fi
     - name: Run Helm unittests
       # Runs all helm-unittest test suites found in the chart.
       # -t JUnit  outputs results in JUnit XML format so they can be picked up
