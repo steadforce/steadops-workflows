@@ -164,38 +164,14 @@ jobs:
           fi
         fi
     - name: Build Helm dependencies
-      # Downloads all chart dependencies declared in Chart.yaml into charts/.
-      # Must run before templating or testing to ensure all sub-charts are
-      # present locally.
-      env:
-        CHART_DIR: ${{ matrix.chart }}
-      run: |
-        set -euo pipefail
-        # `helm dependency build` resolves https repositories against the local
-        # repository list rather than by URL, and a runner starts with none
-        # registered. Every http(s) repository the chart declares is added
-        # first. oci:// and file:// dependencies need no entry, and an alias
-        # (`@name` or `alias:name`) refers to a repository that has to be
-        # registered already, so both are left to Helm. explode(.) resolves the
-        # anchors Chart.yaml commonly uses for the dependency name.
-        while IFS=$'\t' read -r dep_name dep_url; do
-          case "$dep_url" in
-            http://*|https://*) ;;
-            *) continue ;;
-          esac
-          helm repo add "$dep_name" "$dep_url" --force-update > /dev/null
-        done < <(yq -N -r 'explode(.) | .dependencies[]? | [.name, .repository] | @tsv' "$CHART_DIR/Chart.yaml")
-        if [ -f "$CHART_DIR/Chart.lock" ]; then
-          # A committed lock file pins the tested subchart versions, so the
-          # tests run against what the chart will actually ship. This fails
-          # when Chart.lock and Chart.yaml disagree.
-          helm dependency build "$CHART_DIR"
-        else
-          # Without a lock file the versions are resolved from the ranges in
-          # Chart.yaml.
-          echo "::warning::$CHART_DIR/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change the tested chart without a commit. Run 'helm dependency update' and commit the lock file."
-          helm dependency update "$CHART_DIR"
-        fi
+      # Installs the subcharts into charts/, pinned by Chart.lock when it is
+      # committed. Must run before testing to ensure all subcharts are present
+      # locally.
+      # Referenced with its full path: a local path would resolve against the
+      # checkout of the calling repository.
+      uses: steadforce/steadops-workflows/.github/actions/helm-dependencies@v4.2.0
+      with:
+        chart-dir: ${{ matrix.chart }}
     - name: Run Helm unittests
       # Runs all helm-unittest test suites found in the chart.
       # -t JUnit  outputs results in JUnit XML format so they can be picked up

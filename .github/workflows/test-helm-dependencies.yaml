@@ -1,0 +1,85 @@
+# Test Helm Dependencies
+#
+# Runs the helm-dependencies composite action of this repository against the
+# fixture charts under tests/fixtures.
+#
+# Purpose
+# -------
+# The hydration and helm-unittest workflows reference the action by its full
+# path at a release tag, so their tests exercise the released action rather
+# than the one on the pull request. This workflow uses the action through
+# `uses: ./.github/actions/helm-dependencies`, which resolves to the version on
+# the pull request, so a change to the action is validated before it is
+# released.
+#
+# Cases
+# -----
+#   tests/fixtures/single-chart       – committed Chart.lock, installs exactly
+#                                       the pinned version.
+#   tests/fixtures/monorepo/service-c – no Chart.lock, resolves the version
+#                                       range and writes a lock file.
+#   out-of-sync copy of single-chart  – Chart.yaml no longer matches Chart.lock,
+#                                       which has to fail.
+
+name: Test helm dependencies
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+permissions:
+  contents: read
+
+jobs:
+  helm-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+    - name: Set up Helm
+      uses: azure/setup-helm@v5.0.1
+      with:
+        version: v3.19.0
+    - name: Install dependencies pinned by Chart.lock
+      uses: ./.github/actions/helm-dependencies
+      with:
+        chart-dir: tests/fixtures/single-chart
+    - name: Check the pinned version was installed
+      run: |
+        set -euo pipefail
+        test -f tests/fixtures/single-chart/charts/alpha-1.4.2.tgz
+        git diff --exit-code -- tests/fixtures/single-chart/Chart.lock
+    - name: Install dependencies without Chart.lock
+      uses: ./.github/actions/helm-dependencies
+      with:
+        chart-dir: tests/fixtures/monorepo/service-c
+    - name: Check the version range was resolved
+      run: |
+        set -euo pipefail
+        test -f tests/fixtures/monorepo/service-c/charts/alpha-1.4.2.tgz
+        test -f tests/fixtures/monorepo/service-c/Chart.lock
+    - name: Prepare a chart whose Chart.lock is out of sync
+      # The copy stays next to the original, so the relative file:// path to
+      # the upstream stub chart still resolves.
+      run: |
+        set -euo pipefail
+        cp -r tests/fixtures/single-chart tests/fixtures/out-of-sync
+        rm -rf tests/fixtures/out-of-sync/charts
+        yq -i '.dependencies[0].version = "1.4.3"' tests/fixtures/out-of-sync/Chart.yaml
+    - name: Install dependencies with an out-of-sync Chart.lock
+      id: out-of-sync
+      continue-on-error: true
+      uses: ./.github/actions/helm-dependencies
+      with:
+        chart-dir: tests/fixtures/out-of-sync
+    - name: Check the out-of-sync Chart.lock failed
+      env:
+        OUTCOME: ${{ steps.out-of-sync.outcome }}
+      run: |
+        if [ "$OUTCOME" != "failure" ]; then
+          echo "::error::An out-of-sync Chart.lock was accepted, the outcome was '$OUTCOME'."
+          exit 1
+        fi
+        echo "The out-of-sync Chart.lock failed as expected."

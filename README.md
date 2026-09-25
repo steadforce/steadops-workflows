@@ -1,11 +1,11 @@
 # SteadOps GitHub Workflows
 
-Reusable GitHub Actions workflows and a composite action that the SteadOps repositories share for Helm GitOps
+Reusable GitHub Actions workflows and composite actions that the SteadOps repositories share for Helm GitOps
 hydration, Helm chart testing, secret scanning, and MS Teams notifications.
 
 ## Overview
 
-Workflows live in `.github/workflows/`, the action in `.github/actions/`.
+Workflows live in `.github/workflows/`, the actions in `.github/actions/`.
 
 | Component | File | Purpose |
 |---|---|---|
@@ -13,6 +13,7 @@ Workflows live in `.github/workflows/`, the action in `.github/actions/`.
 | [Helm unittest](#helm-unittest-workflow) | `helm-unittest.yaml` | helm-unittest and `helm lint`, Teams on Renovate |
 | [Gitleaks](#gitleaks-secret-scan-workflow) | `gitleaks.yaml` | Scan the full git history for secrets |
 | [Trufflehog](#trufflehog-secret-scan-workflow) | `trufflehog-oss.yaml` | Scan pushed or PR commits for secrets |
+| [Helm dependencies](#helm-dependencies-action) | `helm-dependencies/action.yml` | Install chart dependencies |
 | [Teams notification](#ms-teams-notification-action) | `teams-notification/action.yml` | Post a job result to Teams |
 
 Reference a workflow from a job with `uses:`, either at `@main` as in the examples below or at a release tag such
@@ -98,10 +99,8 @@ Committing `Chart.lock` is recommended but not required.
 Either way the reported version is the one that was actually installed, so it is always a concrete semver and safe
 inside a git branch name. A `Chart.lock` that is out of sync with `Chart.yaml` fails the run.
 
-The HTTP(S) repositories declared in `Chart.yaml` are registered with `helm repo add` before the dependencies are
-installed, so no extra setup is needed. `oci://` and `file://` dependencies need no repository entry. A repository
-alias (`@name` or `alias:name`) must already be registered on the runner, which only a self-hosted runner can
-provide.
+The dependencies are installed with the [Helm dependencies action](#helm-dependencies-action), which also
+registers the chart's HTTP(S) repositories.
 
 ### Repositories Holding Several Charts
 
@@ -322,9 +321,9 @@ jobs:
 
 1. Finds every chart with a `tests/` directory and builds a job matrix from them.
 2. Installs the requested Helm version and the helm-unittest plugin.
-3. Installs the chart dependencies: `helm dependency build` when a `Chart.lock` is committed, so the pinned
-   subchart versions are tested, otherwise `helm dependency update` with a warning that the lock file should be
-   committed. The HTTP(S) repositories declared in `Chart.yaml` are registered first.
+3. Installs the chart dependencies with the [Helm dependencies action](#helm-dependencies-action):
+   `helm dependency build` when a `Chart.lock` is committed, so the pinned subchart versions are tested, otherwise
+   `helm dependency update` with a warning that the lock file should be committed.
 4. Runs `helm unittest` with JUnit output and publishes the results as a check run and job summary, also when the
    tests fail.
 5. Runs `helm lint` to validate the chart.
@@ -407,6 +406,43 @@ jobs:
 
 ---
 
+## Helm Dependencies Action
+
+A composite action that installs the dependencies of a Helm chart into its `charts/` directory. The hydration and
+Helm unittest workflows use it, and it can also be used directly as a step after Helm is installed. It needs
+`helm` and `yq` on the `PATH`, as on GitHub-hosted runners.
+
+| | `Chart.lock` committed | No `Chart.lock` |
+|---|---|---|
+| Command | `helm dependency build` | `helm dependency update` |
+| Installed versions | Exactly the pinned ones | Resolved from the ranges in `Chart.yaml` |
+| Out of sync with `Chart.yaml` | Fails the step | — |
+| Output | — | A warning that the lock file should be committed |
+
+Before installing, the action runs `helm repo add --force-update` for every `http://` and `https://` repository
+declared in `Chart.yaml`, because `helm dependency build` does not resolve repositories by URL on a fresh runner.
+`oci://` and `file://` dependencies need no repository entry. A repository alias (`@name` or `alias:name`) is left
+to Helm, so it must already be registered on the runner, which only a self-hosted runner can provide.
+
+### Dependencies Action Inputs
+
+| Input | Description | Default | Required |
+|---|---|---|---|
+| `chart-dir` | Directory holding the chart's `Chart.yaml` | | Yes |
+
+### Dependencies Action Usage
+
+```yaml
+    - name: Set up Helm
+      uses: azure/setup-helm@v5.0.1
+    - name: Build Helm dependencies
+      uses: steadforce/steadops-workflows/.github/actions/helm-dependencies@v4.2.0
+      with:
+        chart-dir: .
+```
+
+---
+
 ## MS Teams Notification Action
 
 A composite action that posts the result of a job as an Adaptive Card to an MS Teams channel. The workflows of this
@@ -468,8 +504,9 @@ the same image:
 
 `test-helm-hydration.yaml` renders the fixture charts under `tests/fixtures` with the hydration workflow of this
 repository and compares the result against the manifests in `tests/golden`. It calls the workflow through a
-relative `uses:`, so a change is validated by the same run that proposes it, and it uses render-only mode so no
-branches are created here.
+relative `uses:`, so a change to the workflow is validated by the same run that proposes it, and it uses
+render-only mode so no branches are created here. The actions the workflow calls are the released ones, see
+[Releasing](#releasing).
 
 After intentionally changing a fixture, the rendering logic or the pinned Helm version, regenerate the goldens and
 review the diff. The goldens are only valid for the Helm version pinned in the script and the test workflow,
@@ -487,3 +524,21 @@ currently `v3.19.0`, so use the matching image:
 ```
 
 See [tests/README.md](tests/README.md) for what the fixtures cover.
+
+### Testing the Helm Dependencies Action
+
+`test-helm-dependencies.yaml` runs the action through `uses: ./.github/actions/helm-dependencies`, which resolves
+to the version on the pull request. It installs the fixture with a committed `Chart.lock`, the one without, and
+expects a copy whose `Chart.lock` is out of sync with `Chart.yaml` to fail.
+
+### Releasing
+
+The workflows reference the actions of this repository by their full path at a release tag, because a local
+`./.github/actions/...` path would resolve against the checkout of the calling repository. A change to an action
+therefore reaches callers only after:
+
+1. The workflows reference the next release tag, for example `helm-dependencies@v4.2.0`.
+2. The merge commit on `main` is tagged with that version.
+
+Until the tag exists, the jobs that call the action fail to resolve it, for example the hydration tests on the pull
+request. Re-run them after tagging.
