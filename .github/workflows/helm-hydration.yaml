@@ -380,12 +380,15 @@ jobs:
         set -euo pipefail
         # `helm dependency build` resolves https repositories against the local
         # repository list rather than by URL, and a runner starts with none
-        # registered. Every repository the chart declares is added first; oci://
-        # and file:// dependencies need no entry. explode(.) resolves the anchors
-        # Chart.yaml commonly uses for the dependency name.
+        # registered. Every http(s) repository the chart declares is added
+        # first. oci:// and file:// dependencies need no entry, and an alias
+        # (`@name` or `alias:name`) refers to a repository that has to be
+        # registered already, so both are left to Helm. explode(.) resolves the
+        # anchors Chart.yaml commonly uses for the dependency name.
         while IFS=$'\t' read -r dep_name dep_url; do
           case "$dep_url" in
-            ''|oci://*|file://*) continue ;;
+            http://*|https://*) ;;
+            *) continue ;;
           esac
           helm repo add "$dep_name" "$dep_url" --force-update > /dev/null
         done < <(yq -N -r 'explode(.) | .dependencies[]? | [.name, .repository] | @tsv' "$CHART_DIR/Chart.yaml")

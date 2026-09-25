@@ -99,7 +99,9 @@ Either way the reported version is the one that was actually installed, so it is
 inside a git branch name. A `Chart.lock` that is out of sync with `Chart.yaml` fails the run.
 
 The HTTP(S) repositories declared in `Chart.yaml` are registered with `helm repo add` before the dependencies are
-installed, so no extra setup is needed. `oci://` and `file://` dependencies need no repository entry.
+installed, so no extra setup is needed. `oci://` and `file://` dependencies need no repository entry. A repository
+alias (`@name` or `alias:name`) must already be registered on the runner, which only a self-hosted runner can
+provide.
 
 ### Repositories Holding Several Charts
 
