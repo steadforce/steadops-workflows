@@ -212,7 +212,8 @@ The helm unittest workflow bundles helm unittest and helm linting.
 
 | Secret | Description | Required |
 |---|---|---|
-| `steadops-helm-renovation-ms-teams-webhook` | MS Teams Workflows webhook URL (Adaptive Card; legacy Office 365 connector URLs no longer work) used for notifications on Renovate branches. Notifications are skipped when it is not passed | No |
+| `steadops-helm-renovation-ms-teams-webhook` | MS Teams Workflows webhook URL (Adaptive Card; legacy Office 365 connector URLs no longer work) used for notifications on Renovate branches. Receives the success notifications, and the failure notifications when no error webhook is passed | No |
+| `steadops-helm-renovation-ms-teams-error-webhook` | MS Teams Workflows webhook URL for failure notifications on Renovate branches, e.g. of a dedicated error channel. When passed, failures are sent here instead of to `steadops-helm-renovation-ms-teams-webhook`. Notifications are skipped when neither secret is passed | No |
 
 **Which charts are tested:**
 
@@ -244,6 +245,7 @@ jobs:
     uses: steadforce/steadops-workflows/.github/workflows/helm-unittest.yaml@main
     secrets:
       steadops-helm-renovation-ms-teams-webhook: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+      steadops-helm-renovation-ms-teams-error-webhook: ${{ secrets.steadops-helm-renovation-ms-teams-error-webhook }}
 ```
 
 **How it works:**
@@ -252,7 +254,7 @@ jobs:
 3. Runs `helm dependency update` to resolve chart dependencies.
 4. Runs `helm unittest` and publishes the JUnit test results to the GitHub Actions summary.
 5. Runs `helm lint` to validate the chart.
-6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action), if the webhook secret was passed.
+6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success or failure Adaptive Card to MS Teams with the [MS Teams notification action](#ms-teams-notification-action). Successes go to `steadops-helm-renovation-ms-teams-webhook`, failures to `steadops-helm-renovation-ms-teams-error-webhook`, falling back to the former when no error webhook was passed.
 
 ---
 
