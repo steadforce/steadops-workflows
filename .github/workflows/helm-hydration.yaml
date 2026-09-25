@@ -371,33 +371,15 @@ jobs:
       run: |
         helm version
     - name: Build Helm dependencies
-      # Installs the subcharts into charts/. This must run before the version is
-      # resolved and before templating, because it is what produces Chart.lock
-      # for a chart that does not commit one.
-      env:
-        CHART_DIR: ${{ matrix.entry.chart }}
-      run: |
-        set -euo pipefail
-        # `helm dependency build` resolves https repositories against the local
-        # repository list rather than by URL, and a runner starts with none
-        # registered. Every repository the chart declares is added first; oci://
-        # and file:// dependencies need no entry. explode(.) resolves the anchors
-        # Chart.yaml commonly uses for the dependency name.
-        while IFS=$'\t' read -r dep_name dep_url; do
-          case "$dep_url" in
-            ''|oci://*|file://*) continue ;;
-          esac
-          helm repo add "$dep_name" "$dep_url" --force-update > /dev/null
-        done < <(yq -N -r 'explode(.) | .dependencies[]? | [.name, .repository] | @tsv' "$CHART_DIR/Chart.yaml")
-        if [ -f "$CHART_DIR/Chart.lock" ]; then
-          # The committed lock file decides which versions are installed, which
-          # makes the rendered manifests a function of the commit alone. This
-          # fails when Chart.lock and Chart.yaml disagree.
-          helm dependency build "$CHART_DIR"
-        else
-          echo "::warning::$CHART_DIR/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change the rendered manifests without a commit. Run 'helm dependency update' and commit the lock file."
-          helm dependency update "$CHART_DIR"
-        fi
+      # Installs the subcharts into charts/, pinned by Chart.lock when it is
+      # committed. This must run before the version is resolved and before
+      # templating, because it is what produces Chart.lock for a chart that does
+      # not commit one.
+      # Referenced with its full path: a local path would resolve against the
+      # checkout of the calling repository.
+      uses: steadforce/steadops-workflows/.github/actions/helm-dependencies@v4.2.0
+      with:
+        chart-dir: ${{ matrix.entry.chart }}
     - name: Resolve chart metadata
       # Derives everything that depends on which chart is being hydrated: the
       # chart name, the directory the manifests are written to, the suffix that

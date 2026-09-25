@@ -1,0 +1,67 @@
+# Helm dependencies
+#
+# Installs the dependencies of a Helm chart into its charts/ directory.
+#
+# Purpose
+# -------
+# Shared by the workflows of this repository, so every workflow installs the
+# same subchart versions the same way and the logic only has to be maintained
+# in one place.
+#
+# A committed Chart.lock decides which versions are installed, via
+# `helm dependency build`, which fails when Chart.lock and Chart.yaml disagree.
+# Without a lock file the versions are resolved from the ranges in Chart.yaml
+# via `helm dependency update`, and the action warns.
+#
+# Requirements
+# ------------
+# `helm` and `yq` must be on the PATH, as they are on GitHub-hosted runners
+# once azure/setup-helm has run.
+#
+# Usage
+# -----
+# Reusable workflows must reference this action with its full path, e.g.
+# `steadforce/steadops-workflows/.github/actions/helm-dependencies@v4.2.0`.
+# A local `./.github/actions/...` path resolves against the checkout of the
+# calling repository, not this one.
+
+name: Helm dependencies
+description: Install the dependencies of a Helm chart, pinned by Chart.lock when it is committed.
+
+inputs:
+  chart-dir:
+    description: "Directory holding the chart's Chart.yaml."
+    required: true
+
+runs:
+  using: composite
+  steps:
+  - name: Install chart dependencies
+    shell: bash
+    env:
+      CHART_DIR: ${{ inputs.chart-dir }}
+    run: |
+      set -euo pipefail
+      # `helm dependency build` resolves https repositories against the local
+      # repository list rather than by URL, and a runner starts with none
+      # registered. Every http(s) repository the chart declares is added
+      # first. oci:// and file:// dependencies need no entry, and an alias
+      # (`@name` or `alias:name`) refers to a repository that has to be
+      # registered already, so both are left to Helm. explode(.) resolves the
+      # anchors Chart.yaml commonly uses for the dependency name.
+      while IFS=$'\t' read -r dep_name dep_url; do
+        case "$dep_url" in
+          http://*|https://*) ;;
+          *) continue ;;
+        esac
+        helm repo add "$dep_name" "$dep_url" --force-update > /dev/null
+      done < <(yq -N -r 'explode(.) | .dependencies[]? | [.name, .repository] | @tsv' "$CHART_DIR/Chart.yaml")
+      if [ -f "$CHART_DIR/Chart.lock" ]; then
+        # The committed lock file decides which versions are installed, which
+        # makes the result a function of the commit alone. This fails when
+        # Chart.lock and Chart.yaml disagree.
+        helm dependency build "$CHART_DIR"
+      else
+        echo "::warning::$CHART_DIR/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change them without a commit. Run 'helm dependency update' and commit the lock file."
+        helm dependency update "$CHART_DIR"
+      fi
