@@ -94,7 +94,7 @@ Committing `Chart.lock` is recommended but not required.
 | Dependency install | `helm dependency build`, the pinned versions | `helm dependency update`, re-resolved per run |
 | Reproducibility | Manifests are a function of the commit | An upstream release can change them with no commit |
 | Reported version | The pinned version | The version resolved during the run |
-| Workflow output | — | A warning naming the chart |
+| Workflow output | — | A warning naming the missing `Chart.lock` |
 
 Either way the reported version is the one that was actually installed, so it is always a concrete semver and safe
 inside a git branch name. A `Chart.lock` that is out of sync with `Chart.yaml` fails the run.
@@ -183,8 +183,9 @@ jobs:
    branch, and creates the `env: <name>` label if it does not exist yet.
 3. For each chart and environment:
    1. Installs Helm and the chart dependencies, as described under [Chart.lock](#chartlock).
-   2. Reads the chart name from `Chart.yaml` and the primary dependency version from `Chart.lock`. If
-      `bundle-patches-in-one-pr` is `true`, the patch segment of the version is replaced with `x`.
+   2. Reads the chart name from `Chart.yaml` and the primary dependency version from `Chart.lock`, or the chart's
+      own version when it has no dependencies. If `bundle-patches-in-one-pr` is `true`, the patch segment of the
+      version is replaced with `x`.
    3. Runs `helm template` with the environment's value files and API versions, `--include-crds` and
       `--skip-tests`.
    4. Adds the Argo CD annotations `sync-options: ServerSideApply=true` and `sync-wave: "-1"` to every
@@ -313,9 +314,14 @@ jobs:
   unittest:
     uses: steadforce/steadops-workflows/.github/workflows/helm-unittest.yaml@main
     secrets:
-      steadops-helm-renovation-ms-teams-webhook: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
-      steadops-helm-renovation-ms-teams-error-webhook: ${{ secrets.steadops-helm-renovation-ms-teams-error-webhook }}
+      steadops-helm-renovation-ms-teams-webhook: ${{ secrets.MS_TEAMS_WEBHOOK }}
+      steadops-helm-renovation-ms-teams-error-webhook: ${{ secrets.MS_TEAMS_ERROR_WEBHOOK }}
 ```
+
+The keys are the secret names of the reusable workflow. The values reference secrets of the calling repository,
+here `MS_TEAMS_WEBHOOK` and `MS_TEAMS_ERROR_WEBHOOK`, which can have any name GitHub accepts: letters, digits and
+underscores, so not the hyphenated names of the keys. A reference to a secret that does not exist evaluates to an
+empty string, and the notification is then skipped without an error.
 
 ### How Unittest Works
 
@@ -422,7 +428,12 @@ Helm unittest workflows use it, and it can also be used directly as a step after
 Before installing, the action runs `helm repo add --force-update` for every `http://` and `https://` repository
 declared in `Chart.yaml`, because `helm dependency build` does not resolve repositories by URL on a fresh runner.
 `oci://` and `file://` dependencies need no repository entry. A repository alias (`@name` or `alias:name`) is left
-to Helm, so it must already be registered on the runner, which only a self-hosted runner can provide.
+to Helm, so it must already be registered when the action runs. Used directly, an earlier `helm repo add` step in
+the same job does that. The workflows of this repository have no such step, so there only a self-hosted runner
+with the repository registered can resolve an alias.
+
+> [!NOTE]
+> The action is first released with `v4.2.0`. Earlier tags do not contain it.
 
 ### Dependencies Action Inputs
 
