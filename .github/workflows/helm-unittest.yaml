@@ -214,7 +214,7 @@ jobs:
       # Referenced with its full path: a local path would resolve against the
       # checkout of the calling repository.
       if: ${{ startsWith(github.head_ref || github.ref_name, 'renovate/') && !env.ACT && ((success() && env.MS_TEAMS_WEBHOOK != '') || (failure() && (env.MS_TEAMS_ERROR_WEBHOOK != '' || env.MS_TEAMS_WEBHOOK != ''))) }}
-      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.2.0
       with:
         webhook-url: ${{ job.status == 'success' && env.MS_TEAMS_WEBHOOK || env.MS_TEAMS_ERROR_WEBHOOK || env.MS_TEAMS_WEBHOOK }}
         status: ${{ job.status }}
