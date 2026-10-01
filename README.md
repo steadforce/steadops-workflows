@@ -478,7 +478,7 @@ repository use it for their notifications, and it can also be used directly as a
 ```yaml
     - name: Notify MS Teams
       if: ${{ !cancelled() }}
-      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.2.0
       with:
         webhook-url: ${{ secrets.MS_TEAMS_WEBHOOK }}
         status: ${{ job.status }}

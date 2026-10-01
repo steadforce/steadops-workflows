@@ -16,7 +16,7 @@
 # Usage
 # -----
 # Reusable workflows must reference this action with its full path, e.g.
-# `steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0`.
+# `steadforce/steadops-workflows/.github/actions/teams-notification@v4.2.0`.
 # A local `./.github/actions/...` path resolves against the checkout of the
 # calling repository, not this one.
 
