@@ -30,8 +30,14 @@
 #     (created with the "Send webhook alerts to a channel" Workflows template,
 #     shown as "Post to a channel when a webhook request is received" in some
 #     tenants). Legacy Office 365 connector URLs no longer work.
-#     Optional. Notifications are only sent on branches starting with `renovate/`,
-#     and are skipped entirely when the secret is not passed.
+#     Optional. Receives the success notifications, and also the failure
+#     notifications when no error webhook is passed. Notifications are only
+#     sent on branches starting with `renovate/`.
+#   steadops-helm-renovation-ms-teams-error-webhook – MS Teams Workflows
+#     webhook URL for failure notifications, e.g. of a dedicated error channel.
+#     Optional. When passed, failures are sent here instead of to
+#     steadops-helm-renovation-ms-teams-webhook. Notifications are skipped
+#     entirely when neither secret is passed.
 #
 # Expected repository layout
 # --------------------------
@@ -41,6 +47,10 @@
 # charts-root and chart-discovery-depth at the directory the charts live in.
 #
 #   Chart.yaml        – Required by `helm dependency update` and `helm lint`.
+#   Chart.lock        – Should be committed. It pins the subchart versions
+#                       that are tested, via `helm dependency build`. Without
+#                       it the versions are resolved with
+#                       `helm dependency update` and the workflow warns.
 #   tests/            – Directory containing helm-unittest test files
 #                       (*.yaml with `suite:` key). Required by `helm unittest`.
 #
@@ -79,6 +89,8 @@ on:
     secrets:
       steadops-helm-renovation-ms-teams-webhook:
         required: false
+      steadops-helm-renovation-ms-teams-error-webhook:
+        required: false
 
 jobs:
   unittest:
@@ -87,6 +99,7 @@ jobs:
       # Mapped here so a step condition can tell whether the secret was passed;
       # the secrets context is not available in an `if` expression.
       MS_TEAMS_WEBHOOK: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+      MS_TEAMS_ERROR_WEBHOOK: ${{ secrets.steadops-helm-renovation-ms-teams-error-webhook }}
       # One JUnit report per chart, published together by one step.
       RESULTS_DIR: helm-unittest-results
     steps:
@@ -150,9 +163,10 @@ jobs:
           fi
         fi
     - name: Run Helm unittests
-      # Per chart: downloads the dependencies declared in Chart.yaml into
-      # charts/, which must happen first so that all sub-charts are present
-      # locally, and runs all helm-unittest test suites found in the chart.
+      # Per chart: installs the subcharts into charts/, pinned by Chart.lock
+      # when it is committed, which must happen first so that all subcharts are
+      # present locally, and runs all helm-unittest test suites found in the
+      # chart.
       # -t JUnit  outputs results in JUnit XML format so they can be picked up
       #           by the Publish Test Results step below.
       # -o        writes the chart's XML report to $RESULTS_DIR.
@@ -162,15 +176,58 @@ jobs:
       id: unittest
       env:
         WITH_SUBCHART: ${{ inputs.with-subchart }}
+        REGISTERED_REPOSITORIES: ${{ runner.temp }}/helm-repositories.txt
       run: |
         set -uo pipefail
+
+        # Installs the subcharts of one chart into its charts/ directory. Keep
+        # in sync with prepare_chart in helm-hydration.yaml.
+        install_dependencies() {
+          local chart_dir=$1
+
+          # `helm dependency build` resolves https repositories against the
+          # local repository list rather than by URL, and a runner starts with
+          # none registered. Every http(s) repository the chart declares is
+          # added first. oci:// and file:// dependencies need no entry, and an
+          # alias (`@name` or `alias:name`) refers to a repository that has to
+          # be registered already, so both are left to Helm. Charts commonly
+          # share repositories, so each URL is added once per run, under a name
+          # derived from the URL so that two charts using the same dependency
+          # name for different repositories cannot overwrite each other's entry.
+          # explode(.) resolves the anchors Chart.yaml commonly uses for the
+          # dependency name.
+          local dep_url
+          while IFS= read -r dep_url; do
+            case "$dep_url" in
+              http://*|https://*) ;;
+              *) continue ;;
+            esac
+            if grep -qxF "$dep_url" "$REGISTERED_REPOSITORIES" 2> /dev/null; then
+              continue
+            fi
+            helm repo add "repo-$(printf '%s' "$dep_url" | sha256sum | cut -c1-12)" "$dep_url" --force-update > /dev/null || return 1
+            printf '%s\n' "$dep_url" >> "$REGISTERED_REPOSITORIES"
+          done < <(yq -N -r 'explode(.) | .dependencies[]? | .repository' "$chart_dir/Chart.yaml")
+          # `helm repo add` has just downloaded the index of every repository,
+          # so --skip-refresh keeps helm from downloading all of them again for
+          # each chart.
+          if [ -f "$chart_dir/Chart.lock" ]; then
+            # The committed lock file decides which versions are tested. This
+            # fails when Chart.lock and Chart.yaml disagree.
+            helm dependency build --skip-refresh "$chart_dir"
+          else
+            echo "::warning::$chart_dir/Chart.lock is not committed, so the subchart versions are resolved now rather than by the repository, and an upstream release can change them without a commit. Run 'helm dependency update' and commit the lock file."
+            helm dependency update --skip-refresh "$chart_dir"
+          fi
+        }
+
         mkdir -p "$RESULTS_DIR"
         failed=()
         report=0
         while IFS= read -r chart; do
           report=$((report + 1))
           echo "::group::Test $chart"
-          if helm dependency update "$chart" < /dev/null \
+          if install_dependencies "$chart" < /dev/null \
               && helm unittest --with-subchart="$WITH_SUBCHART" \
                 -t JUnit -o "$RESULTS_DIR/$report.xml" "$chart" < /dev/null; then
             echo "::endgroup::"
@@ -218,16 +275,18 @@ jobs:
       # Posts the result to MS Teams on Renovate branches, so the team can
       # approve automated dependency-update PRs with confidence, or is alerted
       # right away that an update broke the chart and must not be merged.
-      # Only runs on branches starting with `renovate/`, when the webhook secret
-      # was passed, and not when using `act`. On pull requests github.ref is
+      # Successes go to the webhook, failures to the error webhook, falling back
+      # to the webhook when no error webhook was passed. Only runs on branches
+      # starting with `renovate/`, when a webhook for the job status was
+      # passed, and not when using `act`. On pull requests github.ref is
       # refs/pull/<number>/merge, so the branch is taken from github.head_ref,
       # falling back to github.ref_name on push.
       # Referenced with its full path: a local path would resolve against the
       # checkout of the calling repository.
-      if: ${{ (success() || failure()) && startsWith(github.head_ref || github.ref_name, 'renovate/') && !env.ACT && env.MS_TEAMS_WEBHOOK != '' }}
-      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.1.0
+      if: ${{ startsWith(github.head_ref || github.ref_name, 'renovate/') && !env.ACT && ((success() && env.MS_TEAMS_WEBHOOK != '') || (failure() && (env.MS_TEAMS_ERROR_WEBHOOK != '' || env.MS_TEAMS_WEBHOOK != ''))) }}
+      uses: steadforce/steadops-workflows/.github/actions/teams-notification@v4.2.0
       with:
-        webhook-url: ${{ secrets.steadops-helm-renovation-ms-teams-webhook }}
+        webhook-url: ${{ job.status == 'success' && env.MS_TEAMS_WEBHOOK || env.MS_TEAMS_ERROR_WEBHOOK || env.MS_TEAMS_WEBHOOK }}
         status: ${{ job.status }}
         title: ${{ job.status == 'success' && '✅ Helm validation and helm unittests succeeded!' || '🚢 Helm validation or helm unittests failed!!!' }}
         facts: |

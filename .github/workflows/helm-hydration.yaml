@@ -262,16 +262,20 @@ jobs:
         set -uo pipefail
 
         # Installs the subcharts of one chart into its charts/ directory and
-        # writes the metadata the render and pull-request steps need to $2.
+        # writes the metadata the render and pull-request steps need to $2. The
+        # dependency installation is kept in sync with install_dependencies in
+        # helm-unittest.yaml.
         prepare_chart() {
           local chart_dir=$1 metadata_file=$2
           local config="$chart_dir/helm-config.yaml"
 
           # `helm dependency build` resolves https repositories against the
           # local repository list rather than by URL, and a runner starts with
-          # none registered. Every repository the chart declares is added first;
-          # oci:// and file:// dependencies need no entry. Charts commonly share
-          # repositories, so each URL is added once per run, under a name
+          # none registered. Every http(s) repository the chart declares is
+          # added first. oci:// and file:// dependencies need no entry, and an
+          # alias (`@name` or `alias:name`) refers to a repository that has to
+          # be registered already, so both are left to Helm. Charts commonly
+          # share repositories, so each URL is added once per run, under a name
           # derived from the URL so that two charts using the same dependency
           # name for different repositories cannot overwrite each other's entry.
           # explode(.) resolves the anchors Chart.yaml commonly uses for the
@@ -279,7 +283,8 @@ jobs:
           local dep_url
           while IFS= read -r dep_url; do
             case "$dep_url" in
-              ''|oci://*|file://*) continue ;;
+              http://*|https://*) ;;
+              *) continue ;;
             esac
             if grep -qxF "$dep_url" "$REGISTERED_REPOSITORIES" 2> /dev/null; then
               continue

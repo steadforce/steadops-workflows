@@ -20,7 +20,7 @@
 # --------
 #   tests/fixtures/single-chart – one chart at the root of a "charts-root",
 #                                 the one-chart-per-repository layout.
-#   tests/fixtures/monorepo     – two charts below a shared root.
+#   tests/fixtures/monorepo     – three charts below a shared root.
 #   tests/fixtures/upstream     – stub charts the fixtures depend on via file://,
 #                                 which keeps the tests independent of any chart
 #                                 repository.
@@ -60,7 +60,7 @@ jobs:
       upload-artifact: true
 
   # ---------------------------------------------------------------------------
-  # Renders the two-chart fixture, which exercises the per-chart manifest
+  # Renders the three-chart fixture, which exercises the per-chart manifest
   # directory and the shared environment set.
   # ---------------------------------------------------------------------------
   hydrate-monorepo:
