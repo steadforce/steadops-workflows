@@ -73,9 +73,11 @@ jobs:
       upload-artifact: true
 
   # ---------------------------------------------------------------------------
-  # Downloads every artifact produced above and compares the whole tree against
-  # the committed goldens. `diff -r` also reports artifacts that are missing or
-  # unexpected, so a chart or environment dropping out of the matrix fails here.
+  # Downloads the artifact of each call above and compares the whole tree
+  # against the committed goldens. Each artifact holds one directory per chart
+  # and environment, and merging them yields the layout of tests/golden.
+  # `diff -r` also reports directories that are missing or unexpected, so a
+  # chart or environment that is no longer hydrated fails here.
   # ---------------------------------------------------------------------------
   compare-with-golden:
     runs-on: ubuntu-latest
@@ -91,6 +93,7 @@ jobs:
       uses: actions/download-artifact@v8
       with:
         path: actual
+        merge-multiple: true
     - name: Compare against golden manifests
       run: |
         if ! diff -ru tests/golden actual; then

@@ -49,7 +49,14 @@ reviewed before they reach a cluster.
 | `charts-root` | Directory the chart search starts from | `.` | No |
 | `chart-discovery-depth` | Maximum search depth for `helm-config.yaml` below `charts-root` | `1` | No |
 | `create-pull-request` | Push to the environment branch and open a PR. `false` renders only | `true` | No |
-| `upload-artifact` | Publish the manifests as one artifact `hydrated-<chart>-<environment>` per chart | `false` | No |
+| `upload-artifact` | Publish the manifests as one artifact, see [Hydration Artifact](#hydration-artifact) | `false` | No |
+
+### Hydration Artifact
+
+With `upload-artifact: true` the rendered manifests are published as one artifact holding a directory
+`hydrated-<chart>-<environment>` per chart and environment. The artifact is named `hydrated-manifests`, followed by
+`-<charts-root>` when `charts-root` is not the repository root, so a caller hydrating several roots in one run gets
+one artifact per root.
 
 ### Repository Layout
 
@@ -99,8 +106,10 @@ Committing `Chart.lock` is recommended but not required.
 Either way the reported version is the one that was actually installed, so it is always a concrete semver and safe
 inside a git branch name. A `Chart.lock` that is out of sync with `Chart.yaml` fails the run.
 
-The dependencies are installed with the [Helm dependencies action](#helm-dependencies-action), which also
-registers the chart's HTTP(S) repositories.
+The dependencies are installed the same way as by the [Helm dependencies action](#helm-dependencies-action), which
+also registers the chart's HTTP(S) repositories. The workflow does this inline rather than through the action,
+because it installs the dependencies of every chart in one step, and registers a repository shared by several
+charts only once.
 
 ### Repositories Holding Several Charts
 
@@ -126,13 +135,14 @@ apps/
 permissions:
   contents: write
   pull-requests: write
-  issues: write        # optional, see below
+  issues: write
 ```
 
-`issues: write` is only needed to give the per-environment label a fixed colour. Labels belong to the issues API
-even when they are only ever used on pull requests, and the permissions of a reusable workflow are capped by those
-of its caller, so the workflow cannot grant it to itself. Without it the run still succeeds: the label is applied to
-the pull request either way, GitHub just picks a random colour for it the first time it appears.
+`issues: write` is required. The workflow uses it to give the per-environment label a fixed colour, and labels
+belong to the issues API even when they are only ever used on pull requests. The permissions of a reusable workflow
+are capped by those of its caller, so a caller that does not grant `issues: write` makes GitHub refuse to start the
+workflow. This also applies in render-only mode (`create-pull-request: false`), even though no label is created
+then.
 
 ### Hydration Usage
 
@@ -177,25 +187,38 @@ jobs:
 
 ### How Hydration Works
 
-1. Searches `charts-root` for `helm-config.yaml` files and builds a parallel job matrix, one job per chart and
-   environment.
-2. Creates the `environments/<name>` branch on origin once per environment if it does not exist yet, as an orphan
-   branch, and creates the `env: <name>` label if it does not exist yet.
-3. For each chart and environment:
-   1. Installs Helm and the chart dependencies, as described under [Chart.lock](#chartlock).
+One `hydrate` job renders every chart and environment, and a `create-pull-request` job runs only for the pairs
+whose manifests changed:
+
+1. Searches `charts-root` for `helm-config.yaml` files and installs Helm once.
+2. For each chart:
+   1. Installs the chart dependencies, as described under [Chart.lock](#chartlock).
    2. Reads the chart name from `Chart.yaml` and the primary dependency version from `Chart.lock`, or the chart's
       own version when it has no dependencies. If `bundle-patches-in-one-pr` is `true`, the patch segment of the
       version is replaced with `x`.
-   3. Runs `helm template` with the environment's value files and API versions, `--include-crds` and
+3. For each of the chart's environments:
+   1. Runs `helm template` with the environment's value files and API versions, `--include-crds` and
       `--skip-tests`.
-   4. Adds the Argo CD annotations `sync-options: ServerSideApply=true` and `sync-wave: "-1"` to every
+   2. Adds the Argo CD annotations `sync-options: ServerSideApply=true` and `sync-wave: "-1"` to every
       CustomResourceDefinition. An existing `sync-options` value is extended, an existing `sync-wave` is kept.
-4. Moves the manifests onto the environment branch, replacing only the output of the chart being hydrated.
-5. Uploads the manifests as an artifact, if `upload-artifact` is `true`.
-6. Opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into
+
+   A chart or environment that fails is reported and skipped. The others are still hydrated, and the job fails at
+   the end.
+4. Creates the `environments/<name>` branch on origin if it does not exist yet, as an orphan branch, and creates the
+   `env: <name>` label if it does not exist yet.
+5. Compares the rendered manifests of each chart and environment against the open pull request for it, or against
+   the environment branch when there is none, and selects the pairs that changed.
+6. Uploads the manifests as an artifact, if `upload-artifact` is `true`.
+7. For each selected pair, a `create-pull-request` job replaces only that chart's output on the environment branch
+   and opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into
    `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`.
 
-With `create-pull-request: false`, steps 2, 4 and 6 are skipped: no branch is created and no pull request is
+A push that changes no manifests therefore starts no pull-request job, and in a repository holding several charts a
+change to one chart only opens pull requests for that chart. Every chart and environment is still rendered on every
+run, because a change outside a chart's directory, or an upstream release for a chart without a committed
+`Chart.lock`, can change its manifests too.
+
+With `create-pull-request: false`, steps 4, 5 and 7 are skipped: no branch is created and no pull request is
 opened, which makes the workflow usable as a validation step on pull requests.
 
 ### Environment Label Colours
@@ -325,22 +348,27 @@ empty string, and the notification is then skipped without an error.
 
 ### How Unittest Works
 
-1. Finds every chart with a `tests/` directory and builds a job matrix from them.
-2. Installs the requested Helm version and the helm-unittest plugin.
-3. Installs the chart dependencies with the [Helm dependencies action](#helm-dependencies-action):
-   `helm dependency build` when a `Chart.lock` is committed, so the pinned subchart versions are tested, otherwise
-   `helm dependency update` with a warning that the lock file should be committed.
-4. Runs `helm unittest` with JUnit output and publishes the results as a check run and job summary, also when the
-   tests fail.
-5. Runs `helm lint` to validate the chart.
-6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts a success
-   or failure Adaptive Card with the [MS Teams notification action](#ms-teams-notification-action). Successes go to
-   `steadops-helm-renovation-ms-teams-webhook`, failures to `steadops-helm-renovation-ms-teams-error-webhook`,
-   falling back to the former when no error webhook was passed.
+All charts are tested by one job:
+
+1. Finds every chart with a `tests/` directory.
+2. Installs the requested Helm version and the helm-unittest plugin once.
+3. For each chart:
+   1. Installs the chart dependencies the same way as the [Helm dependencies action](#helm-dependencies-action):
+      `helm dependency build` when a `Chart.lock` is committed, so the pinned subchart versions are tested,
+      otherwise `helm dependency update` with a warning that the lock file should be committed.
+   2. Runs `helm unittest` with JUnit output.
+4. Publishes the JUnit results of all charts as one check run and job summary, also when the tests fail.
+5. Runs `helm lint` for each chart.
+6. On Renovate branches (branches starting with `renovate/`, for pull requests the source branch), posts one success
+   or failure Adaptive Card for all charts with the [MS Teams notification action](#ms-teams-notification-action).
+   Successes go to `steadops-helm-renovation-ms-teams-webhook`, failures to
+   `steadops-helm-renovation-ms-teams-error-webhook`, falling back to the former when no error webhook was passed.
+
+A chart whose dependencies, tests or lint fail does not stop the others. The job fails once every chart ran.
 
 > [!TIP]
-> A `Chart.lock` that is out of sync with `Chart.yaml` fails the dependency step. Run `helm dependency update` and
-> commit the lock file together with `Chart.yaml`.
+> A `Chart.lock` that is out of sync with `Chart.yaml` fails the tests of that chart. Run `helm dependency update`
+> and commit the lock file together with `Chart.yaml`.
 
 ---
 
@@ -414,9 +442,10 @@ jobs:
 
 ## Helm Dependencies Action
 
-A composite action that installs the dependencies of a Helm chart into its `charts/` directory. The hydration and
-Helm unittest workflows use it, and it can also be used directly as a step after Helm is installed. It needs
-`helm` and `yq` on the `PATH`, as on GitHub-hosted runners.
+A composite action that installs the dependencies of a Helm chart into its `charts/` directory, used as a step
+after Helm is installed. It needs `helm` and `yq` on the `PATH`, as on GitHub-hosted runners. The hydration and
+Helm unittest workflows install the dependencies the same way, but inline, because they handle every chart in one
+step. A change to the logic here has to be made there as well.
 
 | | `Chart.lock` committed | No `Chart.lock` |
 |---|---|---|

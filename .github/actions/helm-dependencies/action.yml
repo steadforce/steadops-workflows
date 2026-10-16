@@ -4,9 +4,11 @@
 #
 # Purpose
 # -------
-# Shared by the workflows of this repository, so every workflow installs the
-# same subchart versions the same way and the logic only has to be maintained
-# in one place.
+# Installs the dependencies of one chart as a step of a caller's job. The
+# hydration and helm unittest workflows install the dependencies of every
+# chart in a single step, so they cannot call this action per chart and carry
+# the same logic inline, in prepare_chart and install_dependencies. A change
+# here has to be made there as well.
 #
 # A committed Chart.lock decides which versions are installed, via
 # `helm dependency build`, which fails when Chart.lock and Chart.yaml disagree.

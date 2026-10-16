@@ -18,7 +18,7 @@ that proposes it.
 | `fixtures/upstream/` | Stub charts the fixtures depend on via `file://`, so the tests need no chart repository |
 | `fixtures/single-chart/` | One chart at the root of a `charts-root`, the one-chart-per-repository layout |
 | `fixtures/monorepo/` | Three charts below a shared root |
-| `golden/hydrated-<chart>-<environment>/` | Expected manifests, one directory per artifact the workflow publishes |
+| `golden/hydrated-<chart>-<environment>/` | Expected manifests, one directory per chart and environment in the artifacts the workflow publishes |
 
 ### What the fixtures cover
 
