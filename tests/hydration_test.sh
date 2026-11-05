@@ -8,12 +8,13 @@ export GITHUB_REPOSITORY=example/platform
 source "$root/scripts/label-renovate-hydration.sh"
 
 check_layout() (
-    local fixture_layout="$1" fixture_source="${2:-nested}" fixture_case fixture_chart_dir fixture_old fixture_update fixture_base fixture_head fixture_candidate fixture_pull_json target result
+    local fixture_layout="$1" fixture_source="${2:-nested}" fixture_release="${3:-release}" fixture_case fixture_chart_dir fixture_old fixture_update fixture_base fixture_head fixture_candidate fixture_pull_json fixture_crd target result
     LAYOUT="$fixture_layout"
     fixture_case="$LAYOUT-$fixture_source"
+    [[ "$fixture_release" == release ]] || fixture_case="$fixture_case-$fixture_release"
     CHARTS_ROOT=infrastructure
     fixture_chart_dir=infrastructure/demo
-    if [[ "$LAYOUT" == root-chart || "$fixture_source" == root ]]; then
+    if [[ "$LAYOUT" == root-chart || "$LAYOUT" == single-chart || "$fixture_source" == root ]]; then
         CHARTS_ROOT=.
         fixture_chart_dir=.
     fi
@@ -29,7 +30,7 @@ check_layout() (
     printf 'apiVersion: v2\nname: child\nversion: 0.1.0\n' > "$fixture_chart_dir/vendor/child/Chart.yaml"
     printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata: {name: widgets.example.invalid}\nspec: {group: example.invalid}\n' > "$fixture_chart_dir/vendor/child/crds/widgets.yaml"
     printf 'apiVersion: v2\nname: demo\nversion: 1.0.0\ndependencies:\n- name: child\n  version: 0.1.0\n  repository: file://vendor/child\n' > "$fixture_chart_dir/Chart.yaml"
-    printf 'releaseName: release\nnamespace: demo\nenvironments:\n  dev: {}\n' > "$fixture_chart_dir/helm-config.yaml"
+    printf 'releaseName: %s\nnamespace: demo\nenvironments:\n  dev: {}\n' "$fixture_release" > "$fixture_chart_dir/helm-config.yaml"
     printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo}\ndata:\n  version: {{ .Chart.Version | quote }}\n' > "$fixture_chart_dir/templates/config.yaml"
     git add .
     git commit --quiet -m initial
@@ -38,8 +39,14 @@ check_layout() (
     git checkout --quiet -b environments/dev
     target=hydrated-manifests
     [[ "$LAYOUT" != multi-chart ]] || target=hydrated-manifests/demo/release/demo
+    [[ "$LAYOUT" != single-chart ]] || target="hydrated-manifests/$fixture_release/demo"
     copy_render() {
         rm -rf hydrated-manifests
+        if [[ "$LAYOUT" == single-chart ]]; then
+            helm template "$fixture_release" "$work/tree-$2/$fixture_chart_dir" --include-crds --skip-tests \
+                --release-name --output-dir hydrated-manifests > /dev/null
+            return
+        fi
         mkdir -p "$target"
         cp -r "$1/." "$target/"
         if [[ "$LAYOUT" == multi-chart ]]; then
@@ -50,7 +57,7 @@ check_layout() (
             mv "$target/charts/child/crds" "$target/chartz/"
         fi
     }
-    copy_render "$work/render-$fixture_old-dev-demo/demo"
+    copy_render "$work/render-$fixture_old-dev-demo/demo" "$fixture_old"
     git add hydrated-manifests
     git commit --quiet -m deployed
     fixture_base="$(git rev-parse HEAD)"
@@ -61,7 +68,7 @@ check_layout() (
     fixture_update="$(git rev-parse HEAD)"
     rendered "$fixture_update" dev "$fixture_chart_dir" > /dev/null
     git checkout --quiet -b hydration environments/dev
-    copy_render "$work/render-$fixture_update-dev-demo/demo"
+    copy_render "$work/render-$fixture_update-dev-demo/demo" "$fixture_update"
     git add hydrated-manifests
     git commit --quiet -m hydrated
     fixture_head="$(git rev-parse HEAD)"
@@ -95,6 +102,20 @@ check_layout() (
     if holds 1 "$fixture_update" "$fixture_chart_dir" > /dev/null; then exit 1; fi
     fixture_pull_json="$(jq --arg head "$fixture_head" '.head.sha = $head' <<< "$fixture_pull_json")"
     git checkout --quiet hydration
+    if [[ "$LAYOUT" == single-chart ]]; then
+        fixture_crd="$(find hydrated-manifests -name widgets.yaml)"
+        [[ -f "$fixture_crd" ]]
+        yq -i '.spec.group = "unexpected.invalid"' "$fixture_crd"
+        git add hydrated-manifests
+        git commit --quiet -m unexpected-crd
+        fixture_head="$(git rev-parse HEAD)"
+        git update-ref refs/pull/1/head "$fixture_head"
+        git checkout --quiet main
+        fixture_pull_json="$(jq --arg head "$fixture_head" '.head.sha = $head' <<< "$fixture_pull_json")"
+        if holds 1 "$fixture_update" "$fixture_chart_dir" > /dev/null; then exit 1; fi
+        git checkout --quiet hydration
+        copy_render "$work/render-$fixture_update-dev-demo/demo" "$fixture_update"
+    fi
     printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo}\ndata: {version: unexpected}\n' > "$target/templates/config.yaml"
     git add hydrated-manifests
     git commit --quiet -m mixed-change
@@ -109,3 +130,5 @@ check_layout() (
 check_layout multi-chart
 check_layout root-chart
 check_layout multi-chart root
+check_layout single-chart root
+check_layout single-chart root demo

@@ -31,6 +31,9 @@ pull_files() { printf '%s\n' Chart.yaml Chart.lock; }
 [[ "$(renovate_chart_dir "$candidate")" == . ]]
 pull_files() { printf '%s\n' hydrated-manifests/templates/config.yaml; }
 [[ "$(hydrated_chart_of 1)" == root ]]
+LAYOUT=single-chart
+pull_files() { printf '%s\n' hydrated-manifests/release/demo/templates/config.yaml hydrated-manifests/demo/charts/child/crds/widgets.yaml; }
+[[ "$(hydrated_chart_of 1)" == root ]]
 if canonical "$temporary/nonexistent"; then exit 1; fi
 mkdir -p "$temporary/first" "$temporary/second"
 printf 'kind: ConfigMap\napiVersion: v1\nmetadata: {name: demo}\ndata: {version: old}\n' > "$temporary/first/config.yaml"

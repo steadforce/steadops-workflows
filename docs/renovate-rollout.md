@@ -39,8 +39,8 @@ Rollout eligibility is independent of Renovate's source-PR automerge policy.
 
 Add this wrapper to the consumer's default branch. Replace both `<release-ref>`
 occurrences with the same trusted release tag or commit SHA, and match the hydration
-workflow's name and tool versions. This example uses Falco's root-source,
-multi-chart-output layout and patch-only rollout.
+workflow's name and tool versions. This example uses a root source chart,
+the single-chart output of the v4.2.0/v4.3.0 producer, and patch-only rollout.
 
 ```yaml
 name: Label Renovate hydration
@@ -72,13 +72,17 @@ jobs:
       helm-version: v3.19.0
       yq-version: v4.49.2
       charts-root: .
-      layout: multi-chart
+      layout: single-chart
       eligible-update-labels: '["update:patch"]'
 ```
 
 Successful hydration runs pass their source SHA. Environment pushes and hydration
 PR updates omit it, so the reusable workflow checks the latest source-branch commit
-and revalidates open PRs against the new base/head. No polling runner is needed.
+and revalidates open PRs against the new base/head when those events can run the
+caller. The producer's manifest-only orphan environment branches do not contain
+workflow files: push and pull-request handlers on those refs alone cannot guarantee
+revalidation. A trusted default-branch dispatch integration or manual dispatch is
+needed for later head/base changes until that event-routing gap is addressed.
 For private shared-repo access, pass the optional `workflows-read-token` secret
 with read-only access.
 
@@ -89,11 +93,16 @@ with read-only access.
 | `sha` | Optional full source commit SHA; defaults to the latest `source-branch` commit |
 | `workflows-ref` | Required; same trusted ref as the workflow call, selects its script |
 | `charts-root` | `infrastructure`; use `.` for a root source chart |
-| `layout` | `multi-chart` for `hydrated-manifests/<chart>/<release>/<chart>/...`; `root-chart` for legacy flat output |
+| `layout` | `single-chart` for `hydrated-manifests/<release>/<chart>/...`; `multi-chart` for `hydrated-manifests/<chart>/<release>/<chart>/...`; `root-chart` for legacy flat output |
 | `eligible-update-labels` | JSON array, default `["update:patch","update:minor"]` |
 | `source-branch` / `environment-branch-prefix` | `main` / `environments/` |
 | `manifest-root` / `renovate-author` | `hydrated-manifests` / `renovate[bot]` |
 
-Source location and output layout are independent: Falco uses `charts-root: .`
-with `layout: multi-chart`. Tool inputs default to Helm `v3.19.0` and yq `v4.49.2`;
-match the producer, rather than relying on its `latest` defaults.
+Source location and output layout are independent. With one discovered root
+`helm-config.yaml`, the pinned v4.2.0/v4.3.0 producers use `charts-root: .` and
+`layout: single-chart`, including Falco and cert-manager. Dependency CRDs can also
+appear outside the release directory; verification includes those files rather
+than comparing only templates. A producer discovering several charts uses
+`layout: multi-chart`. `root-chart` is only for the older flat manifest layout,
+not an alternative name for a root source chart. Tool inputs default to Helm
+`v3.19.0` and yq `v4.49.2`; match the producer rather than its `latest` defaults.

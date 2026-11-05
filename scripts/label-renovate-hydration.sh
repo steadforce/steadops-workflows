@@ -56,7 +56,7 @@ hydrated_chart_of() {
     pull_files "$1" | jq -Rsn --arg root "$MANIFEST_ROOT/" --arg layout "$LAYOUT" '
         inputs | split("\n") | map(select(length > 0)) |
         if length > 0 and all(startswith($root)) then
-          if $layout == "root-chart" then "root" else
+          if $layout != "multi-chart" then "root" else
             if all(ltrimstr($root) | split("/") | length > 1) then
               map(ltrimstr($root) | split("/")[0]) | unique | if length == 1 then .[0] else empty end
             else empty end
@@ -102,7 +102,7 @@ rendered() {
         helm dependency build "$tree/$chart_dir" > /dev/null || return 1
         mkdir -p "$output"
         helm template "$release" "$tree/$chart_dir" "${arguments[@]}" -n "$namespace" --include-crds --skip-tests --output-dir "$output" > /dev/null || return 1
-        if [[ "$LAYOUT" == multi-chart ]]; then
+        if [[ "$LAYOUT" != root-chart ]]; then
             find "$output/$chart" -type f -name '*.yaml' -exec yq -i '.' {} \; || return 1
         fi
         canonical "$output/$chart" > "$output.canonical.tmp" || return 1
@@ -115,13 +115,30 @@ hydrated() {
     output="$work/hydrated-$(printf '%s' "$ref" | tr '/' '-')-$chart"
     mkdir -p "$output/raw" "$output/tree"
     git archive "$ref" "$directory" | tar -x -C "$output/raw" || return 1
-    if [[ "$LAYOUT" == multi-chart ]]; then
-        release="$(find "$output/raw/$directory" -mindepth 1 -maxdepth 1 -type d)"
-        [[ "$(printf '%s\n' "$release" | wc -l)" -eq 1 && -d "$release/$chart" ]] || return 1
+    if [[ "$LAYOUT" != root-chart ]]; then
+        if [[ "$LAYOUT" == single-chart ]]; then
+            release="$(git show "${4%Chart.yaml}helm-config.yaml" | yq -er 'explode(.) | .releaseName')" || return 1
+            release="$output/raw/$directory/$release"
+        else
+            release="$(find "$output/raw/$directory" -mindepth 1 -maxdepth 1 -type d)"
+            [[ "$(printf '%s\n' "$release" | wc -l)" -eq 1 ]] || return 1
+        fi
+        [[ -d "$release/$chart" ]] || return 1
         cp -r "$release/$chart/." "$output/tree/" || return 1
         for entry in "$release"/*; do
             [[ "$(basename "$entry")" == "$chart" ]] || cp -r "$entry" "$output/tree/" || return 1
         done
+        if [[ "$LAYOUT" == single-chart ]]; then
+            for entry in "$output/raw/$directory"/*; do
+                if [[ "$entry" == "$release" ]]; then
+                    continue
+                elif [[ "$(basename "$entry")" == "$chart" ]]; then
+                    cp -r "$entry/." "$output/tree/" || return 1
+                else
+                    cp -r "$entry" "$output/tree/" || return 1
+                fi
+            done
+        fi
     else
         cp -r "$output/raw/$directory/." "$output/tree/" || return 1
         if [[ -d "$output/tree/chartz" ]]; then
@@ -178,11 +195,11 @@ cleanup() {
 main() {
     [[ "$#" -eq 1 && "$1" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected a full source commit SHA' >&2; return 1; }
     jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and . != "update:major")' <<< "$ELIGIBLE_UPDATE_LABELS" > /dev/null || return 1
-    [[ "$LAYOUT" == multi-chart || "$LAYOUT" == root-chart ]] || return 1
+    [[ "$LAYOUT" == multi-chart || "$LAYOUT" == single-chart || "$LAYOUT" == root-chart ]] || return 1
     [[ "$CHARTS_ROOT" == . || "$CHARTS_ROOT" =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]] || return 1
     [[ "$MANIFEST_ROOT" =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]] || return 1
     [[ "$ENVIRONMENT_BRANCH_PREFIX" =~ ^[A-Za-z0-9_/-]+/$ ]] || return 1
-    [[ "$LAYOUT" != root-chart || "$CHARTS_ROOT" == . ]] || return 1
+    [[ "$LAYOUT" == multi-chart || "$CHARTS_ROOT" == . ]] || return 1
     git merge-base --is-ancestor "$1" "origin/$SOURCE_BRANCH" || return 1
     work="$(mktemp -d)"
     trap cleanup EXIT

@@ -19,7 +19,7 @@ on:
         default: infrastructure
         type: string
       layout:
-        description: multi-chart or root-chart; must match the hydration workflow.
+        description: single-chart, multi-chart or legacy root-chart; must match the hydration workflow output.
         default: multi-chart
         type: string
       manifest-root:
