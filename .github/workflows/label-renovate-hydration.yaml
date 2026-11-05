@@ -8,8 +8,8 @@ on:
         default: ''
         type: string
       workflows-ref:
-        description: Same immutable ref as this reusable workflow; selects its scripts.
-        required: true
+        description: Deprecated and ignored; scripts use the resolved reusable-workflow revision.
+        default: ''
         type: string
       source-branch:
         default: main
@@ -47,6 +47,7 @@ on:
         required: false
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
   issues: write
@@ -64,10 +65,23 @@ jobs:
         ref: ${{ inputs.source-branch }}
         fetch-depth: 0
         path: source
+    - name: Resolve reusable workflow revision
+      id: workflow
+      env:
+        GH_TOKEN: ${{ github.token }}
+        WORKFLOW_PATH: steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml
+      run: |
+        metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")" || exit 1
+        sha="$(jq -er --arg path "$WORKFLOW_PATH@" '
+          [.referenced_workflows[]? | select(.path | startswith($path)) | .sha]
+          | unique | if length == 1 then .[0] else error("Expected one resolved labeller workflow revision") end
+        ' <<< "$metadata")" || exit 1
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
     - uses: actions/checkout@v6
       with:
         repository: steadforce/steadops-workflows
-        ref: ${{ inputs.workflows-ref }}
+        ref: ${{ steps.workflow.outputs.sha }}
         path: .steadops
         persist-credentials: false
         token: ${{ secrets.workflows-read-token || github.token }}

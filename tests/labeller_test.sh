@@ -44,3 +44,39 @@ printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: demo}\ndata: {version:
 printf 'not: [valid\n' > "$temporary/second/config.yaml"
 if canonical "$temporary/second" > /dev/null 2>&1; then exit 1; fi
 echo 'Labeller author, path and canonical comparison checks passed'
+
+check_workflow_revision() (
+	local metadata="$1" expected="$2"
+	export GITHUB_RUN_ID=123
+	export GITHUB_OUTPUT="$temporary/workflow-output"
+	export WORKFLOW_PATH=steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml
+	: > "$GITHUB_OUTPUT"
+	gh() {
+		[[ "$*" == 'api repos/example/platform/actions/runs/123' ]] || return 1
+		printf '%s\n' "$metadata"
+	}
+	source <(yq -r '.jobs.label.steps[] | select(.id == "workflow") | .run' "$root/.github/workflows/label-renovate-hydration.yaml")
+	[[ "$(< "$GITHUB_OUTPUT")" == "sha=$expected" ]]
+)
+workflow_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+workflow_metadata="$(jq -cn --arg sha "$workflow_sha" '{referenced_workflows:[
+	{path:"steadforce/steadops-workflows/.github/workflows/helm-hydration.yaml@v4.3.0",sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+	{path:"steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml@v4.4.0",sha:$sha}
+]}')"
+check_workflow_revision "$workflow_metadata" "$workflow_sha"
+if check_workflow_revision '{"referenced_workflows":[]}' "$workflow_sha" 2>/dev/null; then exit 1; fi
+if check_workflow_revision "$(jq '.referenced_workflows[1].sha = "not-a-sha"' <<< "$workflow_metadata")" "$workflow_sha" 2>/dev/null; then exit 1; fi
+if check_workflow_revision "$(jq '.referenced_workflows += [.referenced_workflows[1] | .sha = "cccccccccccccccccccccccccccccccccccccccc"]' <<< "$workflow_metadata")" "$workflow_sha" 2>/dev/null; then exit 1; fi
+echo 'Reusable workflow revision resolves uniquely and fails closed on missing, invalid or ambiguous metadata'
+
+check_release_preflight() (
+	export RELEASE_BRANCH="$1" RELEASE_VERSION="$2"
+	local existing_tag="${3:-}"
+	gh() { printf '%s\n' "$existing_tag"; }
+	source <(yq -r '.jobs.preflight.steps[] | .run' "$root/.github/workflows/release.yaml")
+)
+check_release_preflight refs/heads/main v4.4.0
+if check_release_preflight refs/heads/feature v4.4.0 2>/dev/null; then exit 1; fi
+if check_release_preflight refs/heads/main invalid 2>/dev/null; then exit 1; fi
+if check_release_preflight refs/heads/main v4.4.0 refs/tags/v4.4.0 2>/dev/null; then exit 1; fi
+echo 'Release preflight rejects feature branches, invalid versions and existing tags'

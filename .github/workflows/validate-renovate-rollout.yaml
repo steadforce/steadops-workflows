@@ -3,16 +3,19 @@ name: Validate Renovate hydration
 on:
   pull_request:
     paths:
+    - docs/renovate-rollout.md
     - scripts/label-renovate-hydration.sh
     - tests/**
     - .github/workflows/*renovate*.yaml
   push:
     branches: [main]
     paths:
+    - docs/renovate-rollout.md
     - scripts/label-renovate-hydration.sh
     - tests/**
     - .github/workflows/*renovate*.yaml
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -27,6 +30,9 @@ jobs:
     - uses: azure/setup-helm@v4.3.1
       with:
         version: v3.19.0
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
     - name: Set up validation tools
       run: |
         mkdir -p "$RUNNER_TEMP/steadops-bin"
@@ -41,3 +47,9 @@ jobs:
         shellcheck --severity=warning scripts/label-renovate-hydration.sh
         bash tests/labeller_test.sh
         bash tests/hydration_test.sh
+    - name: Validate native Renovate workflow updates
+      env:
+        RENOVATE_MODULE_ROOT: ${{ runner.temp }}/renovate-validation/node_modules/renovate
+      run: |
+        npm install --prefix "$RUNNER_TEMP/renovate-validation" --no-save --ignore-scripts --no-audit --no-fund renovate@44.220.0
+        node tests/renovate_workflow_test.mjs

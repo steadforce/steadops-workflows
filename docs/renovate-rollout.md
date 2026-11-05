@@ -37,8 +37,9 @@ Rollout eligibility is independent of Renovate's source-PR automerge policy.
 
 ## Caller Workflow
 
-Add this wrapper to the consumer's default branch. Replace both `<release-ref>`
-occurrences with the same trusted release tag or commit SHA, and match the hydration
+Add this wrapper to the consumer's default branch. Replace `<release-sha>` with the
+resolved commit and `<release-version>` with its release tag or development branch.
+Keep the version comment so Renovate can track the reference, and match the hydration
 workflow's name and tool versions. This example uses a root source chart,
 the single-chart output of the v4.2.0/v4.3.0 producer, and patch-only rollout.
 
@@ -56,6 +57,7 @@ on:
     types: [synchronize, reopened, edited]
   workflow_dispatch:
 permissions:
+  actions: read
   contents: read
   pull-requests: write
   issues: write
@@ -65,9 +67,8 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    uses: steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml@<release-ref>
+    uses: steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml@<release-sha> # <release-version>
     with:
-      workflows-ref: <release-ref>
       sha: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
       helm-version: v3.19.0
       yq-version: v4.49.2
@@ -91,7 +92,7 @@ with read-only access.
 | Input | Default / purpose |
 | --- | --- |
 | `sha` | Optional full source commit SHA; defaults to the latest `source-branch` commit |
-| `workflows-ref` | Required; same trusted ref as the workflow call, selects its script |
+| `workflows-ref` | Deprecated compatibility input, ignored; do not set it in new callers |
 | `charts-root` | `infrastructure`; use `.` for a root source chart |
 | `layout` | `single-chart` for `hydrated-manifests/<release>/<chart>/...`; `multi-chart` for `hydrated-manifests/<chart>/<release>/<chart>/...`; `root-chart` for legacy flat output |
 | `eligible-update-labels` | JSON array, default `["update:patch","update:minor"]` |
@@ -106,3 +107,41 @@ than comparing only templates. A producer discovering several charts uses
 `layout: multi-chart`. `root-chart` is only for the older flat manifest layout,
 not an alternative name for a root source chart. Tool inputs default to Helm
 `v3.19.0` and yq `v4.49.2`; match the producer rather than its `latest` defaults.
+
+## Automated Updates And Releases
+
+There is one dependency reference: the caller's `uses:` line. The shared workflow
+uses the run API's `referenced_workflows` metadata to check out scripts at the
+exact resolved workflow commit, independent of later branch/tag movement. This
+requires the caller to grant `actions: read`. Missing or ambiguous metadata fails
+closed instead of choosing another revision. Reusing the labeller at different
+revisions within one run is not supported.
+
+Append this scoped rule to the consumer's existing Renovate `packageRules`:
+
+```json
+{
+  "description": "Maintain the shared hydration labeller with native GitHub Actions updates",
+  "matchManagers": ["github-actions"],
+  "matchPackageNames": ["steadforce/steadops-workflows"],
+  "matchFileNames": [".github/workflows/label-renovate-hydration.yaml"],
+  "pinDigests": true
+}
+```
+
+For development, a SHA followed by `# add-label-renovate-hydration-workflow` lets
+Renovate propose digest updates as that branch advances. For production, use a
+published tag comment such as `# v4.4.0`; Renovate then proposes release updates
+with the matching digest. A bare SHA without the comment is not updatable. The
+rule does not change existing automerge policy, and no second input or regex
+manager needs updating.
+
+After merging the shared changes to `main`, run `Release shared workflows` on
+`main` with a new version such as `v4.4.0`. It runs the labeller tests and the
+producer's golden-manifest checks before creating the tag and generated release
+notes. Existing tags cannot be overwritten. No release is published just by
+merging a consumer PR. Move the initial development-branch comment to the first
+real release tag once that release exists; subsequent updates are handled by
+Renovate. Enable the consumer PRs on their default branches for Renovate to see
+this configuration. No GitHub App credentials or workflow-access settings are
+changed by this automation.
