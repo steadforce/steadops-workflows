@@ -219,7 +219,8 @@ main() {
         chart="$(git show "$commit:$chart_dir/Chart.yaml" | yq -r .name)" || return 1
         while IFS= read -r pull; do
             pr="$(jq -r .number <<< "$pull")"
-            [[ "$(hydrated_chart_of "$pr")" == "$chart" || ( "$LAYOUT" == root-chart && "$(hydrated_chart_of "$pr")" == root ) ]] || continue
+                [[ ( "$LAYOUT" == multi-chart && "$(hydrated_chart_of "$pr")" == "$chart" ) ||
+                    ( "$LAYOUT" != multi-chart && "$(hydrated_chart_of "$pr")" == root ) ]] || continue
             gh pr edit "$pr" --repo "$repo" --remove-label "$LABEL" > /dev/null || return 1
             if snapshot="$(holds "$pr" "$commit" "$chart_dir")"; then
                 upsert_comment "$pr" "Source: \`$commit\` (#$(jq -r .number <<< "$candidate"), Renovate update of \`$chart\`)."$'\n'"$snapshot"$'\n\n'"Contains only the verified Renovate update or consecutive eligible updates of this chart." || return 1

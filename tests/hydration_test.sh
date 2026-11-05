@@ -8,7 +8,7 @@ export GITHUB_REPOSITORY=example/platform
 source "$root/scripts/label-renovate-hydration.sh"
 
 check_layout() (
-    local fixture_layout="$1" fixture_source="${2:-nested}" fixture_release="${3:-release}" fixture_case fixture_chart_dir fixture_old fixture_update fixture_base fixture_head fixture_candidate fixture_pull_json fixture_crd target result
+    local fixture_layout="$1" fixture_source="${2:-nested}" fixture_release="${3:-release}" fixture_case fixture_chart_dir fixture_old fixture_update fixture_base fixture_head fixture_candidate fixture_pull_json fixture_crd fixture_actions target result
     LAYOUT="$fixture_layout"
     fixture_case="$LAYOUT-$fixture_source"
     [[ "$fixture_release" == release ]] || fixture_case="$fixture_case-$fixture_release"
@@ -75,12 +75,18 @@ check_layout() (
     git update-ref refs/pull/1/head "$fixture_head"
     git checkout --quiet main
     git remote add origin "$PWD"
+    git update-ref refs/remotes/origin/main "$fixture_update"
+    fixture_actions="$fixture/$fixture_case/actions"
     fixture_pull_json="$(jq -cn --arg base "$fixture_base" --arg head "$fixture_head" \
-        '{number:1,base:{ref:"environments/dev",sha:$base},head:{sha:$head,repo:{full_name:"example/platform"}}}')"
+        '{number:1,labels:[],base:{ref:"environments/dev",sha:$base},head:{sha:$head,repo:{full_name:"example/platform"}}}')"
     fixture_candidate="$(jq -cn --arg sha "$fixture_update" \
         '{number:2,merge_commit_sha:$sha,user:{login:"renovate[bot]"},labels:[{name:"renovate"},{name:"update:minor"}]}')"
     gh() {
-        if [[ "$*" == *'--jq'* ]]; then
+        if [[ "$1" == label ]]; then
+            return 0
+        elif [[ "$1" == pr && "$2" == edit ]]; then
+            printf '%s\n' "$*" >> "$fixture_actions"
+        elif [[ "$*" == *'--jq'* ]]; then
             jq -r '[.head.sha,.base.sha] | join(" ")' <<< "$fixture_pull_json"
         else
             printf '%s\n' "$fixture_pull_json"
@@ -98,6 +104,22 @@ check_layout() (
     }
     result="$(holds 1 "$fixture_update" "$fixture_chart_dir")"
     [[ "$result" == *"Head: \`$fixture_head\`"* ]]
+    check_main() (
+        local expected="$1"
+        : > "$fixture_actions"
+        api_list() { printf '[%s]\n' "$fixture_pull_json"; }
+        upsert_comment() { printf '%s\n' "$2" >> "$fixture_actions"; }
+        TMPDIR="$fixture/$fixture_case" main "$fixture_update"
+        if [[ "$expected" == eligible ]]; then
+            grep -q -- '--add-label renovate-hydration' "$fixture_actions"
+            grep -q "Source: \`$fixture_update\`" "$fixture_actions"
+        elif grep -q -- '--add-label renovate-hydration' "$fixture_actions"; then
+            exit 1
+        else
+            grep -q 'rendered baseline or proposed output does not match' "$fixture_actions"
+        fi
+    )
+    check_main eligible
     fixture_pull_json="$(jq '.head.sha = "wrong"' <<< "$fixture_pull_json")"
     if holds 1 "$fixture_update" "$fixture_chart_dir" > /dev/null; then exit 1; fi
     fixture_pull_json="$(jq --arg head "$fixture_head" '.head.sha = $head' <<< "$fixture_pull_json")"
@@ -124,7 +146,8 @@ check_layout() (
     git checkout --quiet main
     fixture_pull_json="$(jq --arg head "$fixture_head" '.head.sha = $head' <<< "$fixture_pull_json")"
     if holds 1 "$fixture_update" "$fixture_chart_dir" > /dev/null; then exit 1; fi
-    echo "$fixture_case: real Helm render matches; stale and mixed-change PRs refused"
+    check_main ineligible
+    echo "$fixture_case: main labels verified output; stale and mixed-change PRs refused"
 )
 
 check_layout multi-chart
