@@ -4,8 +4,8 @@ on:
   workflow_call:
     inputs:
       sha:
-        description: Source commit whose hydration has completed successfully.
-        required: true
+        description: Source commit to inspect; defaults to the latest source-branch commit.
+        default: ''
         type: string
       workflows-ref:
         description: Same immutable ref as this reusable workflow; selects its scripts.
@@ -74,6 +74,20 @@ jobs:
     - uses: azure/setup-helm@v4.3.1
       with:
         version: ${{ inputs.helm-version }}
+    - name: Resolve source commit
+      id: source
+      working-directory: source
+      env:
+        SOURCE_SHA: ${{ inputs.sha }}
+        SOURCE_BRANCH: ${{ inputs.source-branch }}
+      run: |
+        if [[ -n "$SOURCE_SHA" ]]; then
+          sha="$SOURCE_SHA"
+        else
+          sha="$(git rev-parse "origin/$SOURCE_BRANCH")"
+        fi
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
     - name: Install yq
       env:
         YQ_VERSION: ${{ inputs.yq-version }}
@@ -89,7 +103,7 @@ jobs:
       working-directory: source
       env:
         GH_TOKEN: ${{ github.token }}
-        SOURCE_SHA: ${{ inputs.sha }}
+        SOURCE_SHA: ${{ steps.source.outputs.sha }}
         SOURCE_BRANCH: ${{ inputs.source-branch }}
         CHARTS_ROOT: ${{ inputs.charts-root }}
         LAYOUT: ${{ inputs.layout }}

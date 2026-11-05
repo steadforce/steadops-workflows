@@ -49,8 +49,11 @@ on:
     workflows: [Helm hydration]
     types: [completed]
     branches: [main]
-  schedule:
-  - cron: '*/15 * * * *'
+  push:
+    branches: ['environments/**']
+  pull_request:
+    branches: ['environments/**']
+    types: [synchronize, reopened, edited]
   workflow_dispatch:
 permissions:
   contents: read
@@ -65,7 +68,7 @@ jobs:
     uses: steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml@<release-ref>
     with:
       workflows-ref: <release-ref>
-      sha: ${{ github.event.workflow_run.head_sha || github.sha }}
+      sha: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
       helm-version: v3.19.0
       yq-version: v4.49.2
       charts-root: .
@@ -73,14 +76,17 @@ jobs:
       eligible-update-labels: '["update:patch"]'
 ```
 
-The schedule rechecks PRs when their base branch moves. For private shared-repo
-access, pass the optional `workflows-read-token` secret with read-only access.
+Successful hydration runs pass their source SHA. Environment pushes and hydration
+PR updates omit it, so the reusable workflow checks the latest source-branch commit
+and revalidates open PRs against the new base/head. No polling runner is needed.
+For private shared-repo access, pass the optional `workflows-read-token` secret
+with read-only access.
 
 ## Key Inputs
 
 | Input | Default / purpose |
 | --- | --- |
-| `sha` | Required full source commit SHA |
+| `sha` | Optional full source commit SHA; defaults to the latest `source-branch` commit |
 | `workflows-ref` | Required; same trusted ref as the workflow call, selects its script |
 | `charts-root` | `infrastructure`; use `.` for a root source chart |
 | `layout` | `multi-chart` for `hydrated-manifests/<chart>/<release>/<chart>/...`; `root-chart` for legacy flat output |
