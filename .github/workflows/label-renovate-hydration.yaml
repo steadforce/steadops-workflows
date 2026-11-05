@@ -1,0 +1,100 @@
+name: Label Renovate hydration
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Source commit whose hydration has completed successfully.
+        required: true
+        type: string
+      workflows-ref:
+        description: Same immutable ref as this reusable workflow; selects its scripts.
+        required: true
+        type: string
+      source-branch:
+        default: main
+        type: string
+      charts-root:
+        description: Parent of eligible charts, or . for a root-chart repository.
+        default: infrastructure
+        type: string
+      layout:
+        description: multi-chart or root-chart; must match the hydration workflow.
+        default: multi-chart
+        type: string
+      manifest-root:
+        default: hydrated-manifests
+        type: string
+      environment-branch-prefix:
+        default: environments/
+        type: string
+      renovate-author:
+        default: renovate[bot]
+        type: string
+      eligible-update-labels:
+        description: JSON array of update-type labels eligible for cluster rollout; independent of source automerge policy.
+        default: '["update:patch","update:minor"]'
+        type: string
+      helm-version:
+        default: v3.19.0
+        type: string
+      yq-version:
+        default: v4.49.2
+        type: string
+    secrets:
+      workflows-read-token:
+        description: Optional read-only token for checking out a private steadops-workflows repository.
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: renovate-hydration-labeller-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ inputs.source-branch }}
+        fetch-depth: 0
+        path: source
+    - uses: actions/checkout@v6
+      with:
+        repository: steadforce/steadops-workflows
+        ref: ${{ inputs.workflows-ref }}
+        path: .steadops
+        persist-credentials: false
+        token: ${{ secrets.workflows-read-token || github.token }}
+    - uses: azure/setup-helm@v4.3.1
+      with:
+        version: ${{ inputs.helm-version }}
+    - name: Install yq
+      env:
+        YQ_VERSION: ${{ inputs.yq-version }}
+      run: |
+        [[ "$YQ_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        mkdir -p "$RUNNER_TEMP/steadops-bin"
+        curl --fail --silent --show-error --location \
+          "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_amd64" \
+          --output "$RUNNER_TEMP/steadops-bin/yq"
+        chmod +x "$RUNNER_TEMP/steadops-bin/yq"
+        echo "$RUNNER_TEMP/steadops-bin" >> "$GITHUB_PATH"
+    - name: Verify and label hydration pull requests
+      working-directory: source
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SOURCE_SHA: ${{ inputs.sha }}
+        SOURCE_BRANCH: ${{ inputs.source-branch }}
+        CHARTS_ROOT: ${{ inputs.charts-root }}
+        LAYOUT: ${{ inputs.layout }}
+        MANIFEST_ROOT: ${{ inputs.manifest-root }}
+        ENVIRONMENT_BRANCH_PREFIX: ${{ inputs.environment-branch-prefix }}
+        RENOVATE_AUTHOR: ${{ inputs.renovate-author }}
+        ELIGIBLE_UPDATE_LABELS: ${{ inputs.eligible-update-labels }}
+      run: bash ../.steadops/scripts/label-renovate-hydration.sh "$SOURCE_SHA"

@@ -1,0 +1,43 @@
+name: Validate Renovate hydration
+
+on:
+  pull_request:
+    paths:
+    - scripts/label-renovate-hydration.sh
+    - tests/**
+    - .github/workflows/*renovate*.yaml
+  push:
+    branches: [main]
+    paths:
+    - scripts/label-renovate-hydration.sh
+    - tests/**
+    - .github/workflows/*renovate*.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - uses: azure/setup-helm@v4.3.1
+      with:
+        version: v3.19.0
+    - name: Set up validation tools
+      run: |
+        mkdir -p "$RUNNER_TEMP/steadops-bin"
+        curl --fail --silent --show-error --location \
+          https://github.com/mikefarah/yq/releases/download/v4.49.2/yq_linux_amd64 \
+          --output "$RUNNER_TEMP/steadops-bin/yq"
+        chmod +x "$RUNNER_TEMP/steadops-bin/yq"
+        echo "$RUNNER_TEMP/steadops-bin" >> "$GITHUB_PATH"
+    - name: Validate hydration eligibility and rendered comparisons
+      run: |
+        bash -n scripts/label-renovate-hydration.sh
+        shellcheck --severity=warning scripts/label-renovate-hydration.sh
+        bash tests/labeller_test.sh
+        bash tests/hydration_test.sh
