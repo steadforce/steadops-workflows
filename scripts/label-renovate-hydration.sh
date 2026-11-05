@@ -101,11 +101,16 @@ rendered() {
         done < <(yq -r '.dependencies[]?.repository | select(test("^https?://"))' "$tree/$chart_dir/Chart.yaml")
         helm dependency build "$tree/$chart_dir" > /dev/null || return 1
         mkdir -p "$output"
+        [[ "$LAYOUT" != single-chart ]] || arguments+=(--release-name)
         helm template "$release" "$tree/$chart_dir" "${arguments[@]}" -n "$namespace" --include-crds --skip-tests --output-dir "$output" > /dev/null || return 1
         if [[ "$LAYOUT" != root-chart ]]; then
-            find "$output/$chart" -type f -name '*.yaml' -exec yq -i '.' {} \; || return 1
+            find "$output" -type f -name '*.yaml' -exec yq -i '.' {} \; || return 1
         fi
-        canonical "$output/$chart" > "$output.canonical.tmp" || return 1
+        if [[ "$LAYOUT" == single-chart ]]; then
+            canonical "$output" > "$output.canonical.tmp" || return 1
+        else
+            canonical "$output/$chart" > "$output.canonical.tmp" || return 1
+        fi
         mv "$output.canonical.tmp" "$output.canonical"
     fi
     printf '%s\n' "$output.canonical"
@@ -115,33 +120,16 @@ hydrated() {
     output="$work/hydrated-$(printf '%s' "$ref" | tr '/' '-')-$chart"
     mkdir -p "$output/raw" "$output/tree"
     git archive "$ref" "$directory" | tar -x -C "$output/raw" || return 1
-    if [[ "$LAYOUT" != root-chart ]]; then
-        if [[ "$LAYOUT" == single-chart ]]; then
-            release="$(git show "${4%Chart.yaml}helm-config.yaml" | yq -er 'explode(.) | .releaseName')" || return 1
-            release="$output/raw/$directory/$release"
-        else
-            release="$(find "$output/raw/$directory" -mindepth 1 -maxdepth 1 -type d)"
-            [[ "$(printf '%s\n' "$release" | wc -l)" -eq 1 ]] || return 1
-        fi
-        [[ -d "$release/$chart" ]] || return 1
+    if [[ "$LAYOUT" == multi-chart ]]; then
+        release="$(find "$output/raw/$directory" -mindepth 1 -maxdepth 1 -type d)"
+        [[ "$(printf '%s\n' "$release" | wc -l)" -eq 1 && -d "$release/$chart" ]] || return 1
         cp -r "$release/$chart/." "$output/tree/" || return 1
         for entry in "$release"/*; do
             [[ "$(basename "$entry")" == "$chart" ]] || cp -r "$entry" "$output/tree/" || return 1
         done
-        if [[ "$LAYOUT" == single-chart ]]; then
-            for entry in "$output/raw/$directory"/*; do
-                if [[ "$entry" == "$release" ]]; then
-                    continue
-                elif [[ "$(basename "$entry")" == "$chart" ]]; then
-                    cp -r "$entry/." "$output/tree/" || return 1
-                else
-                    cp -r "$entry" "$output/tree/" || return 1
-                fi
-            done
-        fi
     else
         cp -r "$output/raw/$directory/." "$output/tree/" || return 1
-        if [[ -d "$output/tree/chartz" ]]; then
+        if [[ "$LAYOUT" == root-chart && -d "$output/tree/chartz" ]]; then
             dependency="$(git show "$4" | yq -er 'select(.dependencies | length == 1) | .dependencies[0] | .alias // .name')" || return 1
             [[ "$dependency" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
             mkdir -p "$output/tree/charts/$dependency"
