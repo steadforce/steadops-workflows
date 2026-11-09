@@ -9,9 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: shared-workflows-release
@@ -39,6 +37,11 @@ jobs:
     uses: ./.github/workflows/validate-renovate-rollout.yaml
   validate-producer:
     needs: preflight
+    # test-helm-hydration.yaml declares these; a caller can only narrow them.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     uses: ./.github/workflows/test-helm-hydration.yaml
   publish:
     needs: [validate-labeller, validate-producer]

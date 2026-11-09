@@ -39,9 +39,12 @@ Rollout eligibility is independent of Renovate's source-PR automerge policy.
 
 Add this wrapper to the consumer's default branch. Replace `<release-sha>` with the
 resolved commit and `<release-version>` with its release tag or development branch.
-Keep the version comment so Renovate can track the reference, and match the hydration
-workflow's name and tool versions. This example uses a root source chart,
-the single-chart output of the v4.2.0/v4.3.0 producer, and patch-only rollout.
+Keep the version comment so Renovate can track the reference. Pass `charts-root`,
+`chart-discovery-depth`, `bundle-patches-in-one-pr` and `helm-version` exactly as
+the hydration call does: they decide which charts exist, where their manifests live
+on the environment branches, how the pull request branches are named and how the
+charts render. This example is a repository with one chart at its root, hydrated
+with Helm `v3.19.0`, and patch-only rollout.
 
 ```yaml
 name: Label Renovate hydration
@@ -50,11 +53,8 @@ on:
     workflows: [Helm hydration]
     types: [completed]
     branches: [main]
-  push:
-    branches: ['environments/**']
-  pull_request:
-    branches: ['environments/**']
-    types: [synchronize, reopened, edited]
+  schedule:
+  - cron: '*/30 * * * *'
   workflow_dispatch:
 permissions:
   actions: read
@@ -70,43 +70,65 @@ jobs:
     uses: steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml@<release-sha> # <release-version>
     with:
       sha: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
-      helm-version: v3.19.0
-      yq-version: v4.49.2
       charts-root: .
-      layout: single-chart
+      chart-discovery-depth: 1
+      helm-version: v3.19.0
       eligible-update-labels: '["update:patch"]'
 ```
 
-Successful hydration runs pass their source SHA. Environment pushes and hydration
-PR updates omit it, so the reusable workflow checks the latest source-branch commit
-and revalidates open PRs against the new base/head when those events can run the
-caller. The producer's manifest-only orphan environment branches do not contain
-workflow files: push and pull-request handlers on those refs alone cannot guarantee
-revalidation. A trusted default-branch dispatch integration or manual dispatch is
-needed for later head/base changes until that event-routing gap is addressed.
-For private shared-repo access, pass the optional `workflows-read-token` secret
-with read-only access.
+Successful hydration runs pass their source SHA; the schedule and manual dispatch
+leave `sha` empty, so the shared workflow checks the latest source-branch commit.
+The schedule is not optional. The gatekeepers merge a pull request only while its
+head and base match the labeller's comment, and the environment branches carry no
+workflows, so nothing else notices when merging one chart's pull request moves the
+base of all the others. Each scheduled run checks the labelled pull requests again
+and records the new base. For private shared-repo access, pass the optional
+`workflows-read-token` secret with read-only access.
+
+A monorepo passes its own discovery, for example `charts-root: .` and
+`chart-discovery-depth: 3` for charts in `infrastructure/<name>` and `apps/<name>`.
+Only charts the hydration discovers are eligible, so a chart under `charts/` that
+other charts consume via `file://` is not.
 
 ## Key Inputs
 
 | Input | Default / purpose |
 | --- | --- |
 | `sha` | Optional full source commit SHA; defaults to the latest `source-branch` commit |
-| `workflows-ref` | Deprecated compatibility input, ignored; do not set it in new callers |
-| `charts-root` | `infrastructure`; use `.` for a root source chart |
-| `layout` | `single-chart` for `hydrated-manifests/<release>/<chart>/...`; `multi-chart` for `hydrated-manifests/<chart>/<release>/<chart>/...`; `root-chart` for legacy flat output |
+| `charts-root` / `chart-discovery-depth` | `.` / `1`, as passed to the hydration workflow |
+| `bundle-patches-in-one-pr` / `helm-version` | `true` / `latest`, as passed to the hydration workflow |
+| `yq-version` | Empty uses the runner's yq, as the hydration workflow does |
 | `eligible-update-labels` | JSON array, default `["update:patch","update:minor"]` |
-| `source-branch` / `environment-branch-prefix` | `main` / `environments/` |
-| `manifest-root` / `renovate-author` | `hydrated-manifests` / `renovate[bot]` |
+| `layout` | Optional `single-chart` or `multi-chart`; derived, and only checked when set |
+| `source-branch` / `renovate-author` | `main` / `renovate[bot]` |
 
-Source location and output layout are independent. With one discovered root
-`helm-config.yaml`, the pinned v4.2.0/v4.3.0 producers use `charts-root: .` and
-`layout: single-chart`, including Falco and cert-manager. Dependency CRDs can also
-appear outside the release directory; verification includes those files rather
-than comparing only templates. A producer discovering several charts uses
-`layout: multi-chart`. `root-chart` is only for the older flat manifest layout,
-not an alternative name for a root source chart. Tool inputs default to Helm
-`v3.19.0` and yq `v4.49.2`; match the producer rather than its `latest` defaults.
+The layout follows from the discovery like the hydration workflow's: one chart owns
+all of `hydrated-manifests/` and its branches are
+`hydration-pull-request/<environment>-<version>`; several charts each own
+`hydrated-manifests/<chart>/` and carry the chart name in the branch. The labeller
+renders with the hydration workflow's own `helm template` invocation and CRD
+post-processing, so the comparison covers every file the hydration writes,
+dependency CRDs outside the release directory included, and ignores only YAML
+formatting and key order. `tests/labeller_test.sh` holds the labeller to the
+hydration goldens byte for byte.
+
+## What Is Verified
+
+- The source is a merged pull request by `renovate-author` with an eligible update
+  label and no `update:major`, changing only one discovered chart's `Chart.yaml`
+  and `Chart.lock`.
+- The pull request changes nothing outside the chart's manifest directory, and that
+  directory equals the chart rendered at the source commit.
+- The environment branch equals the chart rendered just before the update, or
+  before an unbroken run of updates ending in it. A commit in between that is an
+  eligible Renovate update of the same chart, or leaves the chart's render for the
+  environment unchanged, continues the run; commits that touch neither the chart,
+  its `file://` dependencies nor its value files are skipped.
+- An open pull request for an older version of the chart is superseded: it loses the
+  label, its gatekeeper comments say so and `gatekeeper-blocked` is removed.
+
+A render that fails three times in a row, typically a chart repository timing out,
+leaves the pull request as it is until the next run instead of refusing it.
 
 ## Automated Updates And Releases
 
