@@ -13,6 +13,7 @@ Workflows live in `.github/workflows/`, the actions in `.github/actions/`.
 | [Helm unittest](#helm-unittest-workflow) | `helm-unittest.yaml` | helm-unittest and `helm lint`, Teams on Renovate |
 | [Gitleaks](#gitleaks-secret-scan-workflow) | `gitleaks.yaml` | Scan the full git history for secrets |
 | [Trufflehog](#trufflehog-secret-scan-workflow) | `trufflehog-oss.yaml` | Scan pushed or PR commits for secrets |
+| [zizmor](#zizmor-github-actions-audit-workflow) | `zizmor.yaml` | Audit workflows and actions for security issues |
 | [Helm dependencies](#helm-dependencies-action) | `helm-dependencies/action.yml` | Install chart dependencies |
 | [Teams notification](#ms-teams-notification-action) | `teams-notification/action.yml` | Post a job result to Teams |
 
@@ -437,6 +438,96 @@ jobs:
 2. Runs Trufflehog over the resolved commit range.
 3. Publishes a results table to the job summary.
 4. Fails the job if Trufflehog detects any secrets.
+
+---
+
+## zizmor GitHub Actions Audit Workflow
+
+Audits the workflows and composite actions of the calling repository with [zizmor](https://docs.zizmor.sh) for
+security issues: template injection in `run:` blocks, credentials persisted by `actions/checkout`, overly broad
+permissions, dangerous triggers, unpinned action references and more. actionlint checks that a workflow is valid,
+zizmor that it is safe.
+
+### zizmor Inputs
+
+| Input | Description | Default | Required |
+|---|---|---|---|
+| `min-severity` | Lowest severity reported: `informational`, `low`, `medium` or `high`. Empty reports all | `""` | No |
+| `persona` | Auditing persona: `regular`, `pedantic` or `auditor` | `regular` | No |
+| `online-audits` | Run the audits that query GitHub, see [Online Audits](#online-audits) | `false` | No |
+
+### zizmor Secrets
+
+| Secret | Description | Required |
+|---|---|---|
+| `token` | Token for the online audits. Defaults to the `GITHUB_TOKEN` | No |
+
+### zizmor Usage
+
+```yaml
+name: GitHub Actions audit
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+jobs:
+  zizmor:
+    uses: steadforce/steadops-workflows/.github/workflows/zizmor.yaml@main
+```
+
+### Online Audits
+
+Some audits, such as `impostor-commit` and `known-vulnerable-actions`, query GitHub for every repository a `uses:`
+names. When the token cannot read one of them, zizmor fails the whole run instead of skipping the reference. The
+`GITHUB_TOKEN` only reads the repository it belongs to, so every reference to an internal repository, such as the
+workflows of this one, fails the run. The online audits are therefore off by default; set `online-audits: true`
+together with a `token` that can read every referenced repository, for example a GitHub App token, to run them.
+
+### Configuring zizmor
+
+zizmor reads `.github/zizmor.yml` from the calling repository. By default the `unpinned-uses` audit requires every
+action and reusable workflow to be pinned to a commit hash. A repository that pins the workflows of this one to a
+release tag allows that explicitly:
+
+```yaml
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        steadforce/*: ref-pin
+        "*": hash-pin
+```
+
+A single finding is suppressed where it occurs, with a comment stating why:
+
+```yaml
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] triggered by a push to main only
+```
+
+Reproduce the audit locally with the same image; add `-e GH_TOKEN="$(gh auth token)"` and drop
+`--no-online-audits` for the online audits:
+
+```sh
+ docker run \
+   --rm \
+   -u $(id -u) \
+   -e HOME=/tmp \
+   -v "$(pwd):/repo:ro" \
+   -w /repo \
+   ghcr.io/zizmorcore/zizmor:1.32.0 --no-online-audits .
+```
+
+Some findings can be fixed with `--fix=safe`; mount the repository writable and review the diff.
+
+### How zizmor Works
+
+Checks out the repository without persisting the token and runs zizmor 1.32.0 over it. The job log lists every
+finding with its audit, file, line and a link to the audit's documentation, and the job fails on any finding at or
+above `min-severity`.
 
 ---
 
