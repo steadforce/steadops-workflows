@@ -228,3 +228,15 @@ if check_release_preflight refs/heads/feature v4.4.0 2>/dev/null; then exit 1; f
 if check_release_preflight refs/heads/main invalid 2>/dev/null; then exit 1; fi
 if check_release_preflight refs/heads/main v4.4.0 refs/tags/v4.4.0 2>/dev/null; then exit 1; fi
 echo 'Release preflight rejects feature branches, invalid versions and existing tags'
+
+# The script defaults every variable it reads, so a name the workflow misspells falls back in silence; RETRY_SECONDS is for the tests.
+workflow="$root/.github/workflows/label-renovate-hydration.yaml"
+mapped="$(yq -r '.jobs.label.steps[-1].env | keys | .[]' "$workflow")"
+while IFS= read -r variable; do
+    [[ "$variable" == RETRY_SECONDS ]] || grep -qxF "$variable" <<< "$mapped" \
+        || { echo "$variable is read by the script but not set by the workflow's last step" >&2; exit 1; }
+done < <(sed -nE 's/^([A-Z_]+)="\$\{[A-Z_]+:-.*/\1/p' "$root/scripts/label-renovate-hydration.sh")
+while IFS= read -r input; do
+    grep -qE "inputs\.$input([^A-Za-z0-9_-]|$)" "$workflow" || { echo "the input $input is declared but never used" >&2; exit 1; }
+done < <(yq -r '.on.workflow_call.inputs | keys | .[]' "$workflow")
+echo 'The workflow sets every variable the script reads and uses every input it declares'
