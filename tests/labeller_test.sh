@@ -10,6 +10,12 @@ source "$root/scripts/label-renovate-hydration.sh"
 work="$temporary/work"
 mkdir -p "$work"
 
+(
+    api_list() { printf '%s\n' '[{"filename":"hydrated-manifests/demo/config.yaml","previous_filename":"hydrated-manifests/other/config.yaml"},{"filename":"hydrated-manifests/demo/values.yaml"}]'; }
+    [[ "$(pull_files 1)" == $'hydrated-manifests/demo/config.yaml\nhydrated-manifests/demo/values.yaml\nhydrated-manifests/other/config.yaml' ]]
+)
+echo 'Renamed files include both source and destination paths in scope checks'
+
 # Discovery mirrors `find charts-root -maxdepth depth -name helm-config.yaml` of helm-hydration.yaml.
 mkdir -p "$temporary/discovery" && cd "$temporary/discovery"
 git init --quiet -b main
@@ -83,6 +89,49 @@ canonical "$temporary/second" > "$temporary/second.canonical"
 printf 'not: [valid\n' > "$temporary/second/config.yaml"
 if canonical "$temporary/second" > /dev/null 2>&1; then exit 1; fi
 echo 'Canonical comparison ignores formatting and names the files that differ'
+
+printf '{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"extra"}}\n' > "$temporary/first/extra.json"
+canonical "$temporary/first" > "$temporary/json-before.canonical"
+grep -q '^== extra.json$' "$temporary/json-before.canonical"
+printf '{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"changed"}}\n' > "$temporary/first/extra.json"
+canonical "$temporary/first" > "$temporary/json-after.canonical"
+if cmp -s "$temporary/json-before.canonical" "$temporary/json-after.canonical"; then exit 1; fi
+printf 'extra.yaml export-ignore\n' > "$temporary/first/.gitattributes"
+printf 'unverified content\n' > "$temporary/first/resource.txt"
+canonical "$temporary/first" > "$temporary/all-files.canonical"
+grep -q '^== .gitattributes$' "$temporary/all-files.canonical"
+grep -q '^== resource.txt$' "$temporary/all-files.canonical"
+echo 'Canonical comparison includes JSON, attributes and unsupported file extensions'
+
+(
+    mkdir -p "$temporary/cache-check" && cd "$temporary/cache-check"
+    git init --quiet -b main
+    for chart_dir in apps/api apps-api; do
+        mkdir -p "$chart_dir"
+        printf 'environments:\n  dev: {}\n' > "$chart_dir/helm-config.yaml"
+    done
+    mkdir -p hydrated-manifests/apps/api hydrated-manifests/apps-api
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: hidden}\n' > hydrated-manifests/apps/api/hidden.yaml
+    printf 'hidden.yaml export-ignore\n' > hydrated-manifests/apps/api/.gitattributes
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: other}\n' > hydrated-manifests/apps-api/other.yaml
+    git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m caches
+    render_tree() {
+        mkdir -p "$3"
+        printf 'apiVersion: v1\nkind: ConfigMap\ndata: {chart: "%s"}\n' "$1" > "$3/config.yaml"
+    }
+    nested="$(rendered HEAD dev apps/api)"
+    flat="$(rendered HEAD dev apps-api)"
+    [[ "$nested" != "$flat" ]]
+    if cmp -s "$nested" "$flat"; then exit 1; fi
+    [[ "$(cache_key dev apps/api)" != "$(cache_key dev-apps api)" ]]
+    nested="$(hydrated HEAD hydrated-manifests/apps/api)"
+    flat="$(hydrated HEAD hydrated-manifests/apps-api)"
+    [[ "$nested" != "$flat" ]]
+    grep -q '^== hidden.yaml$' "$nested"
+    grep -q '^== .gitattributes$' "$nested"
+    grep -q '^== other.yaml$' "$flat"
+)
+echo 'Render and hydrated caches distinguish paths; export-ignore cannot hide committed files'
 
 # The labeller renders byte for byte what helm-hydration.yaml hydrates, checked against the goldens of test-helm-hydration.yaml.
 cd "$temporary"

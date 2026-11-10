@@ -36,7 +36,7 @@ readonly CRD_ANNOTATIONS='
 repo="${GITHUB_REPOSITORY:?}"
 
 api_list() { gh api "$1" --paginate --slurp | jq 'add // []'; }
-pull_files() { api_list "repos/$repo/pulls/$1/files?per_page=100" | jq -r '.[].filename'; }
+pull_files() { api_list "repos/$repo/pulls/$1/files?per_page=100" | jq -r '[.[] | .filename, (.previous_filename // empty)] | unique[]'; }
 comments_of() { api_list "repos/$repo/issues/$1/comments?per_page=100"; }
 labeller_comment() {
     comments_of "$1" | jq -c --arg marker "$MARKER" --arg user "$LABELLER" \
@@ -121,13 +121,17 @@ chain_paths() {
     done | { printf '%s\n' "$chart_dir"; cat; } | LC_ALL=C sort -u
 }
 
+cache_key() { printf '%s\0' "$@" | sha256sum | cut -d' ' -f1; }
 canonical() {
     local directory="$1" file
     [[ -d "$directory" ]] || return 0
-    while IFS= read -r file; do
+    while IFS= read -r -d '' file; do
         printf '== %s\n' "$file"
-        yq -o=json -I=0 'sort_keys(..)' "$directory/$file" || return 1
-    done < <(find "$directory" -type f \( -name '*.yaml' -o -name '*.yml' \) -printf '%P\n' | LC_ALL=C sort)
+        case "$file" in
+            *.yaml|*.yml|*.json) yq -o=json -I=0 'sort_keys(..)' "$directory/$file" || return 1 ;;
+            *) sha256sum < "$directory/$file" || return 1 ;;
+        esac
+    done < <(find "$directory" -type f -printf '%P\0' | LC_ALL=C sort -z)
 }
 # Up to three files whose documents differ between two canonical renders.
 differing_files() {
@@ -166,7 +170,7 @@ rendered() {
     local commit environment="$2" chart_dir="$3" tree output attempt
     commit="$(git rev-parse --verify --quiet "$1^{commit}")" || return 2
     tree="$work/tree-$commit"
-    output="$work/render-$commit-$environment-$(tr / - <<< "$chart_dir")"
+    output="$work/render-$commit-$(cache_key "$environment" "$chart_dir")"
     if [[ ! -f "$output.canonical" ]]; then
         if ! git show "$commit:$(in_chart "$chart_dir" helm-config.yaml)" 2> /dev/null \
             | environment="$environment" yq -e 'explode(.) | .environments.[env(environment)] != null' > /dev/null 2>&1; then
@@ -188,13 +192,23 @@ rendered() {
 }
 # The canonical manifests in a directory of an environment branch ref; empty where the directory does not exist.
 hydrated() {
-    local ref="$1" directory="$2" output
-    output="$work/hydrated-$(git rev-parse "$ref")-$(tr / - <<< "$directory")"
+    local ref="$1" directory="$2" output commit entry metadata mode type object path
+    commit="$(git rev-parse --verify "$ref^{commit}")" || return 2
+    output="$work/hydrated-$commit-$(cache_key "$directory")"
     if [[ ! -f "$output.canonical" ]]; then
         mkdir -p "$output"
-        if git cat-file -e "$ref:$directory" 2> /dev/null; then
-            git archive "$ref" "$directory" | tar -x -C "$output" || return 2
-        fi
+        git ls-tree -r -z "$commit" -- "$directory" > "$output.tree" || return 2
+        while IFS= read -r -d '' entry; do
+            metadata="${entry%%$'\t'*}"
+            path="${entry#*$'\t'}"
+            read -r mode type object <<< "$metadata"
+            if [[ "$type" != blob || ( "$mode" != 100644 && "$mode" != 100755 ) ]]; then
+                echo "Unsupported Git entry in manifests: $path ($mode $type)" >&2
+                return 2
+            fi
+            mkdir -p "$output/$(dirname "$path")" || return 2
+            git cat-file blob "$object" > "$output/$path" || return 2
+        done < "$output.tree"
         canonical "$output/$directory" > "$output.canonical.tmp" || return 2
         mv "$output.canonical.tmp" "$output.canonical"
     fi

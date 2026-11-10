@@ -72,10 +72,12 @@ pull_file_list() {
     local pull
     pull="$(jq --argjson n "$1" '.[] | select(.number == $n)' "$state/pulls.json")"
     if [[ "$(jq -r '.merge_commit_sha // ""' <<< "$pull")" != "" ]]; then
-        git diff --name-only "$(jq -r .merge_commit_sha <<< "$pull")^1" "$(jq -r .merge_commit_sha <<< "$pull")"
+        git diff --name-status --find-renames "$(jq -r .merge_commit_sha <<< "$pull")^1" "$(jq -r .merge_commit_sha <<< "$pull")"
     else
-        git diff --name-only "$(jq -r .base.sha <<< "$pull")...$(jq -r .head.sha <<< "$pull")"
-    fi | jq -Rn '[inputs | {filename: .}]'
+        git diff --name-status --find-renames "$(jq -r .base.sha <<< "$pull")...$(jq -r .head.sha <<< "$pull")"
+    fi | jq -Rn '[inputs | split("\t") |
+        if .[0] | startswith("R") then {filename: .[2], previous_filename: .[1], status: "renamed"}
+        else {filename: .[1]} end]'
 }
 labels_of() { jq -r --argjson n "$1" '.[] | select(.number == $n) | [.labels[].name] | join(" ")' "$state/pulls.json"; }
 comment_of() { jq -r --argjson n "$1" --arg marker "$MARKER" '[.[] | select(.issue == $n and (.body | startswith($marker)))] | last | .body // ""' "$state/comments.json"; }
@@ -220,6 +222,39 @@ run_labeller "$c7"
 expect_labelled 101
 echo 'monorepo: a pull request carrying more than the update is refused, the clean one labelled'
 
+for extension in json txt; do
+    git worktree add --quiet "$fixture/branch" "$pull"
+    printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"extra"}}\n' > "$fixture/branch/hydrated-manifests/demo/extra.$extension"
+    (cd "$fixture/branch" && commit "Add extra $extension" > /dev/null)
+    git worktree remove --force "$fixture/branch"
+    open_pull 101 "$pull" dev
+    run_labeller "$c7"
+    expect_unlabelled 101
+    expect_comment 101 "extra.$extension"
+    hydrate "$pull" environments/dev "$c7" dev infrastructure/demo
+    open_pull 101 "$pull" dev
+    run_labeller "$c7"
+    expect_labelled 101
+done
+echo 'monorepo: extra JSON and unsupported-extension resources remove the trusted label'
+
+git worktree add --quiet "$fixture/branch" "$pull"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: hidden}\n' > "$fixture/branch/hydrated-manifests/demo/hidden.yaml"
+printf 'hidden.yaml export-ignore\n' > "$fixture/branch/hydrated-manifests/demo/.gitattributes"
+(cd "$fixture/branch" && commit 'Hide an extra manifest from git archive' > /dev/null)
+git worktree remove --force "$fixture/branch"
+archived="$(git archive "$pull" hydrated-manifests/demo | tar -tf -)"
+[[ "$archived" != *hidden.yaml* ]]
+open_pull 101 "$pull" dev
+run_labeller "$c7"
+expect_unlabelled 101
+expect_comment 101 'hidden.yaml'
+hydrate "$pull" environments/dev "$c7" dev infrastructure/demo
+open_pull 101 "$pull" dev
+run_labeller "$c7"
+expect_labelled 101
+echo 'monorepo: export-ignore cannot hide an extra resource from verification'
+
 # Another chart merged into the environment branch moves the base; the label stays and the comment follows it.
 hydrate environments/dev environments/dev "$(git rev-parse main)" dev infrastructure/other
 open_pull 101 "$pull" dev
@@ -286,3 +321,52 @@ run_labeller "$c1"
 expect_unlabelled 201
 expect_comment 201 'it changes files outside `hydrated-manifests`'
 echo 'single chart: the update is labelled, a pull request touching other files refused'
+
+new_repository renamed
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+printf '{{ if ne .Chart.Version "1.0.0" }}\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: transferred}\n{{ end }}\n' > infrastructure/demo/templates/transferred.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+hydrate environments/dev environments/dev "$c0" dev infrastructure/other
+c1="$(renovate_update 31 infrastructure/demo 1.0.1)"
+pull=hydration-pull-request/dev-demo-1.0.x
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+git worktree add --quiet "$fixture/branch" environments/dev
+git show "$pull:hydrated-manifests/demo/release/demo/templates/transferred.yaml" > "$fixture/branch/hydrated-manifests/other/transferred.yaml"
+(cd "$fixture/branch" && commit 'Existing resource owned by the other chart' > /dev/null)
+git worktree remove --force "$fixture/branch"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+git worktree add --quiet "$fixture/branch" "$pull"
+rm "$fixture/branch/hydrated-manifests/other/transferred.yaml"
+(cd "$fixture/branch" && commit 'Rename the other chart resource into the expected output' > /dev/null)
+git worktree remove --force "$fixture/branch"
+open_pull 301 "$pull" dev
+pull_file_list 301 | jq -e 'any(.[]; .previous_filename == "hydrated-manifests/other/transferred.yaml")' > /dev/null
+run_labeller "$c1"
+expect_unlabelled 301
+expect_comment 301 'it changes files outside `hydrated-manifests/demo`'
+echo 'monorepo: renaming another chart resource into valid output is refused'
+
+new_repository cache-collisions
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 LAYOUT=""
+chart apps/api api release
+chart apps-api flat release
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev apps/api
+hydrate environments/dev environments/dev "$c0" dev apps-api
+c1="$(renovate_update 41 apps/api 1.0.1)"
+hydrate hydration-pull-request/dev-api-1.0.x environments/dev "$c1" dev apps/api
+open_pull 401 hydration-pull-request/dev-api-1.0.x dev
+c2="$(renovate_update 42 apps-api 1.0.1)"
+hydrate hydration-pull-request/dev-flat-1.0.x environments/dev "$c2" dev apps-api
+open_pull 402 hydration-pull-request/dev-flat-1.0.x dev
+run_labeller "$c2"
+expect_labelled 401
+expect_labelled 402
+expect_comment 401 "Source: \`$c1\` (#41"
+expect_comment 402 "Source: \`$c2\` (#42"
+echo 'multi-chart: adjacent updates of apps/api and apps-api use independent render caches'
