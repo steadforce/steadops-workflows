@@ -17,6 +17,8 @@ readonly BLOCKED=gatekeeper-blocked GATEKEEPER_MARKER='<!-- gatekeeper-'
 readonly MANIFEST_ROOT=hydrated-manifests ENVIRONMENT_PREFIX=environments/ BRANCH_PREFIX=hydration-pull-request/
 # Renovate updates of a chart often land faster than a cluster deploys them; this many in a row still count as one.
 readonly MAX_CHAIN=10
+# First-parent commits a check walks back at most, whatever they touch; a commit whose render inputs are unchanged costs no render.
+MAX_SCAN=100
 # Runs that queue up replace each other, so every run looks back over recent merges instead of trusting one commit.
 readonly RECENT_COMMITS=20
 # Chart repositories time out now and then; one failed fetch should not cost an update its label.
@@ -74,11 +76,17 @@ release_from_gatekeepers() {
         done
     gh pr edit "$pr" --repo "$repo" --remove-label "$BLOCKED" > /dev/null 2>&1 || true
 }
+# Cached per run: every check walks the same commits of the source branch, and each lookup is an API call.
 merged_pull_request() {
-    api_list "repos/$repo/commits/$1/pulls?per_page=100" | jq -c --arg branch "$SOURCE_BRANCH" --arg commit "$1" --arg integrated "${2:-}" \
-        '[.[] | select(.merged_at != null and .base.ref == $branch)]
-        | (map(select(.merge_commit_sha == $commit)) + map(select($integrated != "" and .merge_commit_sha == $integrated)))
-        | first // empty'
+    local cache="$work/pulls-$1-${2:-none}"
+    if [[ ! -f "$cache" ]]; then
+        api_list "repos/$repo/commits/$1/pulls?per_page=100" | jq -c --arg branch "$SOURCE_BRANCH" --arg commit "$1" --arg integrated "${2:-}" \
+            '[.[] | select(.merged_at != null and .base.ref == $branch)]
+            | (map(select(.merge_commit_sha == $commit)) + map(select($integrated != "" and .merge_commit_sha == $integrated)))
+            | first // empty' > "$cache.tmp" || return 1
+        mv "$cache.tmp" "$cache"
+    fi
+    cat "$cache"
 }
 
 # A path inside a chart directory, which is . for a chart at the repository root.
@@ -106,6 +114,11 @@ manifest_dir() {
 # The version in the chart's hydration branch name, read like helm-hydration.yaml does from the lock file of a rendered commit.
 branch_version() {
     local tree="$work/tree-$1" chart_dir="$2" dependency version
+    # A render shared with another commit leaves no checkout of this one; the lock file needs its dependencies installed.
+    if [[ ! -f "$tree/$(in_chart "$chart_dir" Chart.lock)" ]]; then
+        [[ -d "$tree" ]] || git worktree add --quiet --detach "$tree" "$1" || return 1
+        (cd "$tree" && build_dependencies "$chart_dir" > /dev/null) || return 1
+    fi
     dependency="$(yq 'explode(.) | .primaryDependency // ""' "$tree/$(in_chart "$chart_dir" helm-config.yaml)")" || return 1
     [[ -n "$dependency" ]] || dependency="$(yq 'explode(.) | .name' "$tree/$(in_chart "$chart_dir" Chart.yaml)")" || return 1
     if [[ -f "$tree/$(in_chart "$chart_dir" Chart.lock)" ]]; then
@@ -141,16 +154,43 @@ version_order() {
         | select(length == 2)
         | if .[0] < .[1] then -1 elif .[0] > .[1] then 1 else 0 end'
 }
-# The chart directory, its file:// dependencies and value files: what a commit has to touch to change the chart's render.
-chain_paths() {
-    local commit="$1" chart_dir="$2" path
-    {
-        git show "$commit:$(in_chart "$chart_dir" Chart.yaml)" | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")'
-        git show "$commit:$(in_chart "$chart_dir" helm-config.yaml)" | yq -N -r 'explode(.) | .environments[]?.valueFiles[]?'
-    } | while IFS= read -r path; do
+# Every path a render of the chart at a commit reads: its directory, its file:// dependencies recursively and its value files.
+render_inputs() {
+    local commit="$1" chart_dir="$2" path dependency
+    local -a queue=("$chart_dir")
+    local -A seen=()
+    while [[ "${#queue[@]}" -gt 0 ]]; do
+        path="${queue[0]}"
+        queue=("${queue[@]:1}")
+        [[ -z "${seen[$path]:-}" ]] || continue
+        seen[$path]=1
+        printf '%s\n' "$path"
+        while IFS= read -r dependency; do
+            dependency="$(realpath -m --relative-to=. "$(in_chart "$path" "$dependency")")"
+            # Outside the repository nothing can be told about it.
+            [[ "$dependency" != ../* && "$dependency" != .. ]] || return 1
+            queue+=("$dependency")
+        done < <(git show "$commit:$(in_chart "$path" Chart.yaml)" 2> /dev/null \
+            | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
+    done
+    while IFS= read -r path; do
         path="$(realpath -m --relative-to=. "$(in_chart "$chart_dir" "$path")")"
-        [[ "$path" == ../* || "$path" == .. ]] || printf '%s\n' "$path"
-    done | { printf '%s\n' "$chart_dir"; cat; } | LC_ALL=C sort -u
+        [[ "$path" != ../* && "$path" != .. ]] || return 1
+        printf '%s\n' "$path"
+    done < <(git show "$commit:$(in_chart "$chart_dir" helm-config.yaml)" 2> /dev/null | yq -N -r 'explode(.) | .environments[]?.valueFiles[]?')
+}
+# A key that changes whenever anything a render of the chart reads changes; empty when that cannot be told.
+input_key() {
+    local commit="$1" chart_dir="$2" inputs path object
+    inputs="$(render_inputs "$commit" "$chart_dir" | LC_ALL=C sort -u)" || return 0
+    while IFS= read -r path; do
+        if [[ "$path" == . ]]; then
+            object="$(git rev-parse --verify --quiet "$commit^{tree}")" || object=missing
+        else
+            object="$(git rev-parse --verify --quiet "$commit:$path")" || object=missing
+        fi
+        printf '%s %s\n' "$path" "$object"
+    done <<< "$inputs" | sha256sum | cut -d' ' -f1
 }
 
 cache_key() { printf '%s\0' "$@" | sha256sum | cut -d' ' -f1; }
@@ -170,14 +210,9 @@ differing_files() {
     diff <(awk '/^== /{f=substr($0,4)} {print f "\t" $0}' "$1") <(awk '/^== /{f=substr($0,4)} {print f "\t" $0}' "$2") \
         | sed -n 's/^[<>] \([^\t]*\)\t.*/\1/p' | LC_ALL=C sort -u | head -3 | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'
 }
-# Renders a chart for an environment into $3 the way helm-hydration.yaml does, from the root of a checkout.
-render_tree() {
-    local chart_dir="$1" environment="$2" output="$3" config release namespace repository apis value_files
-    local -a arguments=()
-    config="$(in_chart "$chart_dir" helm-config.yaml)"
-    release="$(yq 'explode(.) | .releaseName // ""' "$config")" || return 1
-    namespace="$(yq 'explode(.) | .namespace // ""' "$config")" || return 1
-    [[ -n "$release" && -n "$namespace" ]] || { echo "$config names no releaseName or namespace" >&2; return 1; }
+# Installs a chart's dependencies the way helm-hydration.yaml does, from the root of a checkout.
+build_dependencies() {
+    local chart_dir="$1" repository
     while IFS= read -r repository; do
         [[ "$repository" == http://* || "$repository" == https://* ]] || continue
         grep -qxF "$repository" "$work/repositories" 2> /dev/null && continue
@@ -189,6 +224,16 @@ render_tree() {
     else
         helm dependency update --skip-refresh "$chart_dir" > /dev/null || return 1
     fi
+}
+# Renders a chart for an environment into $3 the way helm-hydration.yaml does, from the root of a checkout.
+render_tree() {
+    local chart_dir="$1" environment="$2" output="$3" config release namespace apis value_files
+    local -a arguments=()
+    config="$(in_chart "$chart_dir" helm-config.yaml)"
+    release="$(yq 'explode(.) | .releaseName // ""' "$config")" || return 1
+    namespace="$(yq 'explode(.) | .namespace // ""' "$config")" || return 1
+    [[ -n "$release" && -n "$namespace" ]] || { echo "$config names no releaseName or namespace" >&2; return 1; }
+    build_dependencies "$chart_dir" || return 1
     apis="$(hydration="$environment" yq 'explode(.) | (.environments.[env(hydration)].apis // []) | @csv' "$config")" || return 1
     value_files="$(hydration="$environment" chart_dir="$chart_dir" yq 'explode(.) | (.environments.[env(hydration)].valueFiles // []) | map(env(chart_dir) + "/" + .) | @csv' "$config")" || return 1
     [[ -z "$apis" ]] || arguments+=(-a "$apis")
@@ -197,12 +242,14 @@ render_tree() {
         --output-dir "$output" --include-crds --release-name --skip-tests > /dev/null || return 1
     find "$output" -type f \( -name '*.yaml' -o -name '*.yml' \) -exec yq -i "$CRD_ANNOTATIONS" {} \; || return 1
 }
-# The canonical render of a chart at a commit for an environment, cached; empty where the commit does not hydrate it, status 2 when it cannot be rendered.
+# The canonical render of a chart at a commit for an environment, cached by its inputs; empty where the commit does not hydrate it, status 2 when it cannot be rendered.
 rendered() {
-    local commit environment="$2" chart_dir="$3" tree output attempt
+    local commit environment="$2" chart_dir="$3" tree output attempt key
     commit="$(git rev-parse --verify --quiet "$1^{commit}")" || return 2
     tree="$work/tree-$commit"
-    output="$work/render-$commit-$(cache_key "$environment" "$chart_dir")"
+    # Commits with the same render inputs share one render, so commits elsewhere in a monorepo cost none.
+    key="$(input_key "$commit" "$chart_dir")"
+    output="$work/render-$(cache_key "${key:-commit $commit}" "$environment" "$chart_dir")"
     if [[ ! -f "$output.canonical" ]]; then
         if ! git show "$commit:$(in_chart "$chart_dir" helm-config.yaml)" 2> /dev/null \
             | environment="$environment" yq -e 'explode(.) | .environments.[env(environment)] != null' > /dev/null 2>&1; then
@@ -280,7 +327,7 @@ renovate_chart_dir() {
 # Whether pull request $1 is exactly the update merged as $2 of chart $3, or a run of Renovate updates ending in it.
 # 0 it is (HOLDS_HEAD, HOLDS_BASE, HOLDS_EARLIER); 1 it is not (HOLDS_REASON); 2 it could not be checked.
 holds() {
-    local pr="$1" source="$2" chart_dir="$3" pull environment directory path count=0 after deployed proposed merged before at link link_pr update_tip="$2" matched="" ended=""
+    local pr="$1" source="$2" chart_dir="$3" pull environment directory path count=0 after deployed proposed merged before at link link_pr update_tip="$2" matched="" ended="" stopped="" scanned=0
     local -a earlier=()
     HOLDS_HEAD="" HOLDS_BASE="" HOLDS_EARLIER="" HOLDS_REASON=""
     pull="$(gh api "repos/$repo/pulls/$pr")" || return 2
@@ -326,18 +373,27 @@ holds() {
     deployed="$(hydrated "refs/remotes/steadops-base/$pr" "$directory")" || return 2
     proposed="$(hydrated "$merged" "$directory")" || return 2
     # Back from source while every commit is an eligible Renovate update of the chart or leaves this environment's render alone, until the branch matches.
-    for link in $(git rev-list --first-parent --max-count="$MAX_CHAIN" "$source"); do
-        git rev-parse --verify --quiet "$link^1" > /dev/null || break
+    # MAX_CHAIN bounds the updates in the run, MAX_SCAN the commits walked; render-neutral commits only count toward the second.
+    for link in $(git rev-list --first-parent --max-count="$MAX_SCAN" "$source"); do
+        scanned=$((scanned + 1))
+        git rev-parse --verify --quiet "$link^1" > /dev/null || { stopped=root; break; }
         if [[ "$link" != "$source" ]]; then
             link_pr="$(merged_pull_request "$link" "$update_tip")" || return 2
             if [[ -n "$link_pr" && "$(renovate_chart_dir "$link_pr" "$link" 2> /dev/null)" == "$chart_dir" ]]; then
                 update_tip="$(jq -r .merge_commit_sha <<< "$link_pr")"
-                [[ "$update_tip" != "$link" ]] || earlier+=("#$(jq -r .number <<< "$link_pr")")
+                if [[ "$update_tip" == "$link" ]]; then
+                    if (( ${#earlier[@]} + 1 >= MAX_CHAIN )); then
+                        stopped=chain
+                        break
+                    fi
+                    earlier+=("#$(jq -r .number <<< "$link_pr")")
+                fi
             else
                 at="$(rendered "$link" "$environment" "$chart_dir")" || return 2
                 before="$(rendered "$link^1" "$environment" "$chart_dir")" || return 2
                 if ! cmp -s "$at" "$before"; then
                     ended="${link:0:7}"
+                    stopped=ended
                     break
                 fi
             fi
@@ -348,6 +404,15 @@ holds() {
             break
         fi
     done
+    if [[ -z "$matched" && -z "$stopped" && "$scanned" -ge "$MAX_SCAN" ]] && cmp -s "$after" "$proposed"; then
+        # Running out of history is no evidence against the pull request.
+        HOLDS_REASON="no deployed state of the chart within the last $MAX_SCAN commits of $SOURCE_BRANCH"
+        return 2
+    fi
+    if [[ -z "$matched" && "$stopped" == chain ]]; then
+        HOLDS_REASON="more than $MAX_CHAIN Renovate updates of the chart in a row are not deployed to \`$ENVIRONMENT_PREFIX$environment\`; merge the pull request by hand"
+        return 1
+    fi
     if [[ -z "$matched" ]]; then
         before="$(rendered "$source^1" "$environment" "$chart_dir")" || return 2
         HOLDS_REASON="\`$ENVIRONMENT_PREFIX$environment\` differs from the chart rendered just before the update, in $(differing_files "$before" "$deployed"), and no run of Renovate updates${ended:+ back to $ended, a commit that is not one and changes this environment,} explains it: an earlier change is not deployed yet, or the branch holds an older rendering, so the pull request carries that difference too"
@@ -389,7 +454,7 @@ verify() {
         0) echo "#$pr carries the update from ${source:0:7}${HOLDS_EARLIER:+ with $HOLDS_EARLIER}"
            accept "$pr" "$labelled" "$source" "$(jq -r .number <<< "$candidate")" "$(chart_name "$source" "$chart_dir")" ;;
         1) refuse "$pr" "$labelled" "$HOLDS_REASON" ;;
-        *) echo "::warning::#$pr could not be checked against ${source:0:7}, see the log; left as it is" ;;
+        *) echo "::warning::#$pr could not be checked against ${source:0:7}${HOLDS_REASON:+: $HOLDS_REASON}, see the log; left as it is" ;;
     esac
 }
 

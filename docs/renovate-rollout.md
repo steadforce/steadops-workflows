@@ -124,14 +124,23 @@ hydration goldens byte for byte.
 - The environment branch equals the chart rendered just before the update, or
   before an unbroken run of updates ending in it. A commit in between that is an
   eligible Renovate update of the same chart, or leaves the chart's render for the
-  environment unchanged, continues the run. All first-parent commits within the
-  verification window are examined. Earlier rebased commits of the same merged PR
-  are checked against the complete PR, so the boundary can precede its first commit.
+  environment unchanged, continues the run. Every first-parent commit is examined,
+  up to 100 back; the run may hold at most 10 updates, and render-neutral commits
+  do not count toward that. Earlier rebased commits of the same merged PR are
+  checked against the complete PR, so the boundary can precede its first commit.
+- A commit is render-neutral without rendering when nothing a render reads changed:
+  the chart directory, its `file://` dependencies recursively and its value files.
+  Commits elsewhere in a monorepo therefore cost a few `git rev-parse` calls, not a
+  Helm run; a chart whose inputs reach outside the repository is rendered at every
+  commit.
 - An open pull request for an older version of the chart is superseded: it loses the
   label, its gatekeeper comments say so and `gatekeeper-blocked` is removed.
 
 A render that fails three times in a row, typically a chart repository timing out,
-leaves the pull request as it is until the next run instead of refusing it.
+leaves the pull request as it is until the next run instead of refusing it. So does
+a deployed state further back than 100 commits: running out of history is no
+evidence against the pull request. More than 10 undeployed updates in a row are
+refused, to be merged by hand.
 
 ## Automated Updates And Releases
 

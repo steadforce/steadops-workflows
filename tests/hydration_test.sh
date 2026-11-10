@@ -528,3 +528,61 @@ for earlier_change in chart-only values template other-chart; do
     fi
     echo "rebased PR: $earlier_change checks the entire PR and the before-first-commit render boundary"
 done
+
+# A busy monorepo: commits elsewhere neither use up the update chain nor cost a render, a change to a shared dependency still ends the run.
+eval "$(declare -f render_tree | sed '1s/^render_tree/counted_render_tree/')"
+render_tree() { echo "$1" >> "$fixture/renders"; counted_render_tree "$@"; }
+new_repository budgets
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+mkdir -p charts/shared/templates
+printf 'apiVersion: v2\nname: shared\nversion: 1.0.0\n' > charts/shared/Chart.yaml
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: shared}\ndata: {owner: shared}\n' > charts/shared/templates/shared.yaml
+yq -i '.dependencies = [{"name": "shared", "version": "1.0.0", "repository": "file://../../charts/shared"}]' infrastructure/demo/Chart.yaml
+yq -i '.primaryDependency = "shared"' infrastructure/demo/helm-config.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+for i in $(seq 1 15); do
+    printf 'setting: change-%s\n' "$i" > infrastructure/other/values.yaml
+    commit "Change other $i" > /dev/null
+done
+c1="$(renovate_update 61 infrastructure/demo 1.0.1)"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 601 "$pull" dev
+: > "$fixture/renders"
+run_labeller "$c1"
+expect_labelled 601
+expect_comment 601 'Carries this update and nothing else'
+[[ "$(grep -cx infrastructure/demo "$fixture/renders")" -le 2 ]] || { echo "rendered demo $(wc -l < "$fixture/renders") times" >&2; exit 1; }
+echo 'budgets: fifteen commits to another chart neither end the run nor cost a render each'
+
+for i in $(seq 16 21); do
+    printf 'setting: change-%s\n' "$i" > infrastructure/other/values.yaml
+    commit "Change other $i" > /dev/null
+done
+c2="$(renovate_update 62 infrastructure/demo 1.0.2)"
+hydrate "$pull" environments/dev "$c2" dev infrastructure/demo
+open_pull 601 "$pull" dev
+run_labeller "$c2"
+expect_labelled 601
+expect_comment 601 'earlier Renovate updates #61 of the same chart'
+(
+    MAX_SCAN=5
+    run_labeller "$c2"
+)
+expect_labelled 601
+grep -q 'no deployed state of the chart within the last 5 commits' "$fixture/log"
+echo 'budgets: running out of history leaves the label as it is'
+
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: shared}\ndata: {owner: changed}\n' > charts/shared/templates/shared.yaml
+shared_change="$(commit 'Change the shared chart')"
+c3="$(renovate_update 63 infrastructure/demo 1.0.3)"
+hydrate "$pull" environments/dev "$c3" dev infrastructure/demo
+open_pull 601 "$pull" dev
+run_labeller "$c3"
+expect_unlabelled 601
+expect_comment 601 "back to ${shared_change:0:7}"
+echo 'budgets: an undeployed change to a file:// dependency outside the chart ends the run'

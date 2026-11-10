@@ -473,11 +473,12 @@ requests with that label; the labeller itself never merges and never accesses a 
    loses the label; a newer one is left alone.
 3. Renders the chart with the hydration workflow's own invocation and post-processing, at the update and before it,
    and compares the renders with the pull request and its environment branch, ignoring only YAML formatting and
-   key order. Commits before the update that are Renovate updates of the same chart, or leave its render for the
-   environment unchanged, extend the run; any other commit touching the chart ends it.
+   key order. Walking back up to 100 commits, Renovate updates of the same chart (at most 10) and commits that leave
+   its render for the environment unchanged extend the run; any other commit ends it. A commit that changes nothing
+   the render reads, the chart, its `file://` dependencies recursively and its value files, is not rendered at all.
 4. Labels a pull request that holds, with a comment recording the source commit, head and base; refuses one that
-   does not, says why and hands it back from the gatekeepers. A render that fails three times leaves the pull
-   request as it is until the next run.
+   does not, says why and hands it back from the gatekeepers. A render that fails three times, or no deployed state
+   within 100 commits, leaves the pull request as it is until the next run.
 5. Checks every other labelled pull request again against its recorded source, which records a moved base.
 
 ---

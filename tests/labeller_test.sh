@@ -73,7 +73,7 @@ echo 'Eligibility checks the author, the update labels and the changed files'
 )
 echo 'Eligibility checks the entire source PR as well as its integrated commit delta'
 
-# What a commit has to touch to change a chart's render: the chart, its file:// dependencies and value files outside it.
+# What a render reads: the chart, its file:// dependencies recursively and its value files, wherever they are.
 cat > infrastructure/demo/Chart.yaml <<'EOF'
 apiVersion: v2
 name: demo
@@ -86,10 +86,22 @@ dependencies:
   version: 2.0.0
   repository: https://charts.example.invalid
 EOF
+mkdir -p charts/shared charts/base
+printf 'apiVersion: v2\nname: shared\nversion: 1.0.0\ndependencies:\n- name: base\n  version: 1.0.0\n  repository: file://../base\n' > charts/shared/Chart.yaml
+printf 'apiVersion: v2\nname: base\nversion: 1.0.0\n' > charts/base/Chart.yaml
 printf 'environments:\n  dev: &environment\n    valueFiles: [values.yaml, ../common.yaml]\n  prod: *environment\n' > infrastructure/demo/helm-config.yaml
-git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m paths
-[[ "$(chain_paths HEAD infrastructure/demo | paste -sd' ')" == "charts/shared infrastructure/common.yaml infrastructure/demo infrastructure/demo/values.yaml" ]]
-echo 'The chain follows the chart, its file:// dependencies and its value files'
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m inputs
+[[ "$(render_inputs HEAD infrastructure/demo | LC_ALL=C sort -u | paste -sd' ')" == "charts/base charts/shared infrastructure/common.yaml infrastructure/demo infrastructure/demo/values.yaml" ]]
+key="$(input_key HEAD infrastructure/demo)"
+[[ "$key" =~ ^[0-9a-f]{64}$ ]]
+touch apps/web/values.yaml && git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m elsewhere
+[[ "$(input_key HEAD infrastructure/demo)" == "$key" ]]
+printf 'replicas: 2\n' > charts/base/values.yaml && git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m nested
+[[ "$(input_key HEAD infrastructure/demo)" != "$key" ]]
+printf 'apiVersion: v2\nname: demo\nversion: 1.0.0\ndependencies:\n- name: outside\n  version: 1.0.0\n  repository: file://../../../outside\n' > infrastructure/demo/Chart.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m outside
+[[ -z "$(input_key HEAD infrastructure/demo)" ]]
+echo 'Render inputs follow file:// dependencies recursively; their key ignores changes elsewhere and gives up outside the repository'
 
 # Canonical comparison ignores key order and formatting, not content.
 mkdir -p "$temporary/first" "$temporary/second"
