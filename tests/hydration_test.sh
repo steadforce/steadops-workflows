@@ -608,3 +608,55 @@ run_labeller "$c1"
 expect_unlabelled 701
 expect_comment 701 "back to ${target_change:0:7}"
 echo 'symlinks: a change behind a symlinked values file ends the run'
+
+
+# What a pull request brings into its manifests that the labeller does not accept refuses it, even with the label on: a crafted name, a symlink.
+new_repository names
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: second}\n' > infrastructure/demo/templates/second.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+c1="$(renovate_update 81 infrastructure/demo 1.0.1)"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 801 "$pull" dev
+run_labeller "$c1"
+expect_labelled 801
+
+# config.yaml is deleted; second.yaml moves to a name that spells out config.yaml's document and the header of second.yaml.
+git worktree add --quiet "$fixture/branch" "$pull"
+(
+    cd "$fixture/branch/hydrated-manifests/demo"
+    deleted=release/demo/templates/config.yaml
+    next=release/demo/templates/second.yaml
+    crafted="$deleted
+$(yq -o=json -I=0 'sort_keys(..)' "$deleted")
+== $next"
+    mkdir -p "$(dirname "$crafted")"
+    mv "$next" "$crafted"
+    rm "$deleted"
+    cd "$fixture/branch" && commit 'Hide a deleted manifest in a file name' > /dev/null
+)
+git worktree remove --force "$fixture/branch"
+open_pull 801 "$pull" dev
+run_labeller "$c1"
+expect_unlabelled 801
+expect_comment 801 'control character'
+echo 'names: a newline in a manifest name cannot hide a deleted manifest, and refuses the labelled pull request'
+
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 801 "$pull" dev
+run_labeller "$c1"
+expect_labelled 801
+git worktree add --quiet "$fixture/branch" "$pull"
+ln -s release/demo/templates/config.yaml "$fixture/branch/hydrated-manifests/demo/link.yaml"
+(cd "$fixture/branch" && commit 'Add a symlink to the manifests' > /dev/null)
+git worktree remove --force "$fixture/branch"
+open_pull 801 "$pull" dev
+run_labeller "$c1"
+expect_unlabelled 801
+expect_comment 801 '(120000 blob), which the labeller does not accept'
+echo 'names: a symlink in the manifests refuses the labelled pull request instead of leaving it labelled'

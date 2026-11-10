@@ -134,6 +134,11 @@ hydration goldens byte for byte.
   Helm run. A chart whose inputs reach outside the repository, or a commit with a
   symlink on or below one of them, is rendered at every commit instead: a symlink's
   blob does not change when its target does.
+- The manifests of the merge result and of the environment branch hold only regular
+  files with plain names. A symlink, a submodule or a name with a control character
+  refuses the pull request, label and all: it is what the pull request brought in, not
+  a passing failure. File names are compared JSON-encoded, so no name can fake the
+  boundary to another file.
 - An open pull request for an older version of the chart is superseded: it loses the
   label, its gatekeeper comments say so and `gatekeeper-blocked` is removed.
 

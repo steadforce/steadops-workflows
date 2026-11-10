@@ -138,17 +138,30 @@ printf 'not: [valid\n' > "$temporary/second/config.yaml"
 if canonical "$temporary/second" > /dev/null 2>&1; then exit 1; fi
 echo 'Canonical comparison ignores formatting and names the files that differ'
 
+# A file name with a newline cannot fake the boundary to another file and so stand in for a deleted manifest.
+mkdir -p "$temporary/names/render" "$temporary/names/crafted"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\n' > "$temporary/names/render/a.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: b}\n' > "$temporary/names/render/b.yaml"
+cp "$temporary/names/render/b.yaml" "$temporary/names/crafted/a.yaml
+$(yq -o=json -I=0 'sort_keys(..)' "$temporary/names/render/a.yaml")
+== b.yaml"
+[[ "$(canonical "$temporary/names/render")" != "$(canonical "$temporary/names/crafted")" ]]
+canonical "$temporary/names/render" > "$temporary/names/render.canonical"
+canonical "$temporary/names/crafted" > "$temporary/names/crafted.canonical"
+[[ "$(differing_files "$temporary/names/render.canonical" "$temporary/names/crafted.canonical")" == *'\n'* ]]
+echo 'File names are encoded, so a newline in one cannot stand in for a deleted manifest'
+
 printf '{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"extra"}}\n' > "$temporary/first/extra.json"
 canonical "$temporary/first" > "$temporary/json-before.canonical"
-grep -q '^== extra.json$' "$temporary/json-before.canonical"
+grep -qxF '== "extra.json"' "$temporary/json-before.canonical"
 printf '{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"changed"}}\n' > "$temporary/first/extra.json"
 canonical "$temporary/first" > "$temporary/json-after.canonical"
 if cmp -s "$temporary/json-before.canonical" "$temporary/json-after.canonical"; then exit 1; fi
 printf 'extra.yaml export-ignore\n' > "$temporary/first/.gitattributes"
 printf 'unverified content\n' > "$temporary/first/resource.txt"
 canonical "$temporary/first" > "$temporary/all-files.canonical"
-grep -q '^== .gitattributes$' "$temporary/all-files.canonical"
-grep -q '^== resource.txt$' "$temporary/all-files.canonical"
+grep -qxF '== ".gitattributes"' "$temporary/all-files.canonical"
+grep -qxF '== "resource.txt"' "$temporary/all-files.canonical"
 echo 'Canonical comparison includes JSON, attributes and unsupported file extensions'
 
 (
@@ -175,9 +188,9 @@ echo 'Canonical comparison includes JSON, attributes and unsupported file extens
     nested="$(hydrated HEAD hydrated-manifests/apps/api)"
     flat="$(hydrated HEAD hydrated-manifests/apps-api)"
     [[ "$nested" != "$flat" ]]
-    grep -q '^== hidden.yaml$' "$nested"
-    grep -q '^== .gitattributes$' "$nested"
-    grep -q '^== other.yaml$' "$flat"
+    grep -qxF '== "hidden.yaml"' "$nested"
+    grep -qxF '== ".gitattributes"' "$nested"
+    grep -qxF '== "other.yaml"' "$flat"
 )
 echo 'Render and hydrated caches distinguish paths; export-ignore cannot hide committed files'
 

@@ -215,7 +215,8 @@ canonical() {
     local directory="$1" file
     [[ -d "$directory" ]] || return 0
     while IFS= read -r -d '' file; do
-        printf '== %s\n' "$file"
+        # JSON-encoded: a raw name could carry a newline and a fake boundary to the next file.
+        printf '== %s\n' "$(jq -nr --arg file "$file" '$file | @json')"
         case "$file" in
             *.yaml|*.yml|*.json) yq -o=json -I=0 'sort_keys(..)' "$directory/$file" || return 1 ;;
             *) sha256sum < "$directory/$file" || return 1 ;;
@@ -225,7 +226,25 @@ canonical() {
 # Up to three files whose documents differ between two canonical renders.
 differing_files() {
     diff <(awk '/^== /{f=substr($0,4)} {print f "\t" $0}' "$1") <(awk '/^== /{f=substr($0,4)} {print f "\t" $0}' "$2") \
-        | sed -n 's/^[<>] \([^\t]*\)\t.*/\1/p' | LC_ALL=C sort -u | head -3 | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'
+        | sed -n 's/^[<>] \([^\t]*\)\t.*/\1/p' | jq -Rr 'fromjson | if test("[[:cntrl:]]") then @json else . end' \
+        | LC_ALL=C sort -u | head -3 | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g'
+}
+# The first manifest entry below a directory that the labeller does not accept: a symlink, a submodule or a name with a control character.
+unsupported_entry() {
+    local entry metadata mode type path
+    while IFS= read -r -d '' entry; do
+        metadata="${entry%%$'\t'*}"
+        path="${entry#*$'\t'}"
+        read -r mode type _ <<< "$metadata"
+        if [[ "$type" != blob || ( "$mode" != 100644 && "$mode" != 100755 ) ]]; then
+            printf '`%s` (%s %s)\n' "$(jq -nr --arg path "$path" '$path | @json')" "$mode" "$type"
+            return 0
+        fi
+        if [[ "$path" == *[[:cntrl:]]* ]]; then
+            printf '`%s`, a name with a control character\n' "$(jq -nr --arg path "$path" '$path | @json')"
+            return 0
+        fi
+    done < <(git ls-tree -r -z "$1" -- "$2")
 }
 # Installs a chart's dependencies the way helm-hydration.yaml does, from the root of a checkout.
 build_dependencies() {
@@ -313,7 +332,7 @@ hydrated() {
 
 # The chart directory an eligible Renovate pull request merged as a commit updates, or the reason on stderr.
 renovate_chart_dir() {
-    local pull="$1" commit="$2" files integrated directory
+    local pull="$1" commit="$2" files integrated directory charts
     if [[ "$(jq -r .user.login <<< "$pull")" != "$RENOVATE_AUTHOR" ]]; then
         echo "it was opened by $(jq -r .user.login <<< "$pull"), not $RENOVATE_AUTHOR" >&2
         return 1
@@ -334,7 +353,9 @@ renovate_chart_dir() {
         echo "it changes more than one chart's Chart.yaml and Chart.lock" >&2
         return 1
     fi
-    if ! charts_at "$commit" | grep -qxF -- "$directory"; then
+    # Not piped into grep -q: it stops at the first match, and under pipefail charts_at's SIGPIPE would fail the test.
+    charts="$(charts_at "$commit")" || return 1
+    if ! grep -qxF -- "$directory" <<< "$charts"; then
         echo "\`$directory\` is not a chart the hydration discovers below \`$CHARTS_ROOT\`" >&2
         return 1
     fi
@@ -344,7 +365,7 @@ renovate_chart_dir() {
 # Whether pull request $1 is exactly the update merged as $2 of chart $3, or a run of Renovate updates ending in it.
 # 0 it is (HOLDS_HEAD, HOLDS_BASE, HOLDS_EARLIER); 1 it is not (HOLDS_REASON); 2 it could not be checked.
 holds() {
-    local pr="$1" source="$2" chart_dir="$3" pull environment directory path count=0 after deployed proposed merged before at link link_pr update_tip="$2" matched="" ended="" stopped="" scanned=0
+    local pr="$1" source="$2" chart_dir="$3" pull environment directory path entry count=0 after deployed proposed merged before at link link_pr update_tip="$2" matched="" ended="" stopped="" scanned=0
     local -a earlier=()
     HOLDS_HEAD="" HOLDS_BASE="" HOLDS_EARLIER="" HOLDS_REASON=""
     pull="$(gh api "repos/$repo/pulls/$pr")" || return 2
@@ -369,6 +390,10 @@ holds() {
             HOLDS_REASON="it changes files outside \`$directory\`"
             return 1
         fi
+        if [[ "$path" == *[[:cntrl:]]* ]]; then
+            HOLDS_REASON="it changes a file whose name contains a control character"
+            return 1
+        fi
         count=$((count + 1))
     done < "$work/paths-$pr"
     if [[ "$count" -eq 0 ]]; then
@@ -386,6 +411,17 @@ holds() {
             return 1
         fi
     done < "$work/merge-paths-$pr"
+    # What the pull request itself brings in is its fault, not a passing failure, so it is refused rather than left as it is.
+    entry="$(unsupported_entry "$merged" "$directory")" || return 2
+    if [[ -n "$entry" ]]; then
+        HOLDS_REASON="its manifests contain $entry, which the labeller does not accept"
+        return 1
+    fi
+    entry="$(unsupported_entry "$HOLDS_BASE" "$directory")" || return 2
+    if [[ -n "$entry" ]]; then
+        HOLDS_REASON="\`$ENVIRONMENT_PREFIX$environment\` contains $entry, which the labeller does not accept"
+        return 1
+    fi
     after="$(rendered "$source" "$environment" "$chart_dir")" || return 2
     deployed="$(hydrated "refs/remotes/steadops-base/$pr" "$directory")" || return 2
     proposed="$(hydrated "$merged" "$directory")" || return 2
