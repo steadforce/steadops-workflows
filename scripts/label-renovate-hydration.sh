@@ -36,7 +36,15 @@ readonly CRD_ANNOTATIONS='
 repo="${GITHUB_REPOSITORY:?}"
 
 api_list() { gh api "$1" --paginate --slurp | jq 'add // []'; }
-pull_files() { api_list "repos/$repo/pulls/$1/files?per_page=100" | jq -r '[.[] | .filename, (.previous_filename // empty)] | unique[]'; }
+pull_files() {
+    if [[ -n "${2:-}" ]]; then
+        git diff --no-ext-diff --no-textconv --no-renames --name-only "$2^1" "$2" --
+    else
+        api_list "repos/$repo/pulls/$1/files?per_page=100" | jq -er '
+            if length >= 3000 then error("PR file list may be truncated")
+            else [.[] | .filename, (.previous_filename // empty)] | unique[] end'
+    fi
+}
 comments_of() { api_list "repos/$repo/issues/$1/comments?per_page=100"; }
 labeller_comment() {
     comments_of "$1" | jq -c --arg marker "$MARKER" --arg user "$LABELLER" \
@@ -108,6 +116,27 @@ branch_version() {
         version="$(cut -d. -f1,2 <<< "$version").x"
     fi
     printf '%s\n' "$version"
+}
+version_order() {
+    jq -ner --arg left "$1" --arg right "$2" '
+        def numeric: [length, .];
+        def bundled:
+            capture("^(?<major>0|[1-9][0-9]*)\\.(?<minor>0|[1-9][0-9]*)\\.x$")
+            | [(.major | numeric), (.minor | numeric)];
+        def semver:
+            capture("^(?<major>0|[1-9][0-9]*)\\.(?<minor>0|[1-9][0-9]*)\\.(?<patch>0|[1-9][0-9]*)(?:-(?<pre>[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$") as $version
+            | ($version.pre // "" | if . == "" then [] else split(".") end) as $pre
+            | select(all($pre[]; (test("^[0-9]+$") | not) or test("^(0|[1-9][0-9]*)$")))
+            | [($version.major | numeric), ($version.minor | numeric), ($version.patch | numeric),
+               (if $pre == [] then 1 else 0 end),
+               ($pre | map(if test("^[0-9]+$") then [0, numeric] else [1, .] end))];
+        if ($left | endswith(".x")) and ($right | endswith(".x")) then
+            [($left | bundled), ($right | bundled)]
+        elif ($left | endswith(".x")) or ($right | endswith(".x")) then
+            error("bundled and concrete versions are not comparable")
+        else [($left | semver), ($right | semver)] end
+        | select(length == 2)
+        | if .[0] < .[1] then -1 elif .[0] > .[1] then 1 else 0 end'
 }
 # The chart directory, its file:// dependencies and value files: what a commit has to touch to change the chart's render.
 chain_paths() {
@@ -193,7 +222,7 @@ rendered() {
 # The canonical manifests in a directory of an environment branch ref; empty where the directory does not exist.
 hydrated() {
     local ref="$1" directory="$2" output commit entry metadata mode type object path
-    commit="$(git rev-parse --verify "$ref^{commit}")" || return 2
+    commit="$(git rev-parse --verify "$ref^{tree}")" || return 2
     output="$work/hydrated-$commit-$(cache_key "$directory")"
     if [[ ! -f "$output.canonical" ]]; then
         mkdir -p "$output"
@@ -227,7 +256,7 @@ renovate_chart_dir() {
         echo "its update type is not one of $(jq -r 'join(", ")' <<< "$ELIGIBLE_UPDATE_LABELS")" >&2
         return 1
     fi
-    files="$(pull_files "$(jq -r .number <<< "$pull")")" || return 1
+    files="$(pull_files "$(jq -r .number <<< "$pull")" "$commit")" || return 1
     directory="$(jq -Rsr 'split("\n") | map(select(length > 0))
         | if length > 0 and all(test("(^|/)Chart\\.(yaml|lock)$")) then
             map(split("/")[0:-1] | if length == 0 then "." else join("/") end) | unique | if length == 1 then .[0] else "" end
@@ -246,8 +275,8 @@ renovate_chart_dir() {
 # Whether pull request $1 is exactly the update merged as $2 of chart $3, or a run of Renovate updates ending in it.
 # 0 it is (HOLDS_HEAD, HOLDS_BASE, HOLDS_EARLIER); 1 it is not (HOLDS_REASON); 2 it could not be checked.
 holds() {
-    local pr="$1" source="$2" chart_dir="$3" pull environment directory files after deployed proposed before at link link_pr matched="" ended=""
-    local -a paths=() earlier=()
+    local pr="$1" source="$2" chart_dir="$3" pull environment directory path count=0 after deployed proposed merged before at link link_pr matched="" ended=""
+    local -a earlier=()
     HOLDS_HEAD="" HOLDS_BASE="" HOLDS_EARLIER="" HOLDS_REASON=""
     pull="$(gh api "repos/$repo/pulls/$pr")" || return 2
     if [[ "$(jq -r .head.repo.full_name <<< "$pull")" != "$repo" ]]; then
@@ -261,21 +290,38 @@ holds() {
     fi
     environment="${environment#"$ENVIRONMENT_PREFIX"}"
     directory="$(manifest_dir "$source" "$chart_dir")" || return 2
-    files="$(pull_files "$pr")" || return 2
-    if [[ -z "$files" ]] || awk -v prefix="$directory/" 'index($0, prefix) != 1 { found = 1 } END { exit !found }' <<< "$files"; then
-        HOLDS_REASON="it changes files outside \`$directory\`"
-        return 1
-    fi
     HOLDS_HEAD="$(jq -r .head.sha <<< "$pull")"
     HOLDS_BASE="$(jq -r .base.sha <<< "$pull")"
     git fetch --quiet origin "+refs/heads/$ENVIRONMENT_PREFIX$environment:refs/remotes/steadops-base/$pr" "+refs/pull/$pr/head:refs/remotes/steadops-pr/$pr" || return 2
     [[ "$(git rev-parse "refs/remotes/steadops-base/$pr")" == "$HOLDS_BASE" && "$(git rev-parse "refs/remotes/steadops-pr/$pr")" == "$HOLDS_HEAD" ]] || return 2
+    git diff --no-ext-diff --no-textconv --no-renames --name-only -z "$HOLDS_BASE...$HOLDS_HEAD" -- > "$work/paths-$pr" || return 2
+    while IFS= read -r -d '' path; do
+        if [[ "$path" != "$directory/"* ]]; then
+            HOLDS_REASON="it changes files outside \`$directory\`"
+            return 1
+        fi
+        count=$((count + 1))
+    done < "$work/paths-$pr"
+    if [[ "$count" -eq 0 ]]; then
+        HOLDS_REASON="it has no changed files"
+        return 1
+    fi
+    if ! merged="$(git merge-tree --write-tree "$HOLDS_BASE" "$HOLDS_HEAD")"; then
+        HOLDS_REASON="its merge into the checked base has conflicts or cannot be verified"
+        return 1
+    fi
+    git diff --no-ext-diff --no-textconv --no-renames --name-only -z "$HOLDS_BASE" "$merged" -- > "$work/merge-paths-$pr" || return 2
+    while IFS= read -r -d '' path; do
+        if [[ "$path" != "$directory/"* ]]; then
+            HOLDS_REASON="its merge changes files outside \`$directory\`"
+            return 1
+        fi
+    done < "$work/merge-paths-$pr"
     after="$(rendered "$source" "$environment" "$chart_dir")" || return 2
     deployed="$(hydrated "refs/remotes/steadops-base/$pr" "$directory")" || return 2
-    proposed="$(hydrated "refs/remotes/steadops-pr/$pr" "$directory")" || return 2
-    mapfile -t paths < <(chain_paths "$source" "$chart_dir")
+    proposed="$(hydrated "$merged" "$directory")" || return 2
     # Back from source while every commit is an eligible Renovate update of the chart or leaves this environment's render alone, until the branch matches.
-    for link in $(git rev-list --first-parent --max-count="$MAX_CHAIN" "$source" -- "${paths[@]}"); do
+    for link in $(git rev-list --first-parent --max-count="$MAX_CHAIN" "$source"); do
         git rev-parse --verify --quiet "$link^1" > /dev/null || break
         if [[ "$link" != "$source" ]]; then
             link_pr="$(merged_pull_request "$link")" || return 2
@@ -343,7 +389,7 @@ verify() {
 
 # Checks the hydration pull requests of one Renovate update, and takes the label off older versions it supersedes.
 label_update() {
-    local commit="$1" candidate="$2" chart_dir="$3" chart suffix="" pull pr environment labelled version found=0 other newer
+    local commit="$1" candidate="$2" chart_dir="$3" chart suffix="" pull pr environment labelled version found=0 other newer order
     chart="$(chart_name "$commit" "$chart_dir")"
     ! multi_chart_at "$commit" || suffix="-$chart"
     while IFS= read -r pull; do
@@ -354,7 +400,6 @@ label_update() {
             '.head.ref | select(startswith($prefix)) | ltrimstr($prefix) | select(test("^[0-9]+\\.[0-9]+\\."))' <<< "$pull")"
         [[ -n "$other" ]] || continue
         found=$((found + 1))
-        handled[$pr]=1
         labelled=false
         ! jq -e --arg label "$LABEL" 'any(.labels[]; .name == $label)' <<< "$pull" > /dev/null || labelled=true
         if ! rendered "$commit" "$environment" "$chart_dir" > /dev/null || ! version="$(branch_version "$commit" "$chart_dir")"; then
@@ -362,8 +407,12 @@ label_update() {
             continue
         fi
         if [[ "$other" != "$version" ]]; then
-            if [[ "$(printf '%s\n%s\n' "$other" "$version" | sort -V | tail -1)" != "$version" ]]; then
-                echo "#$pr is $other, newer than the update's $version; left alone"
+            if ! order="$(version_order "$other" "$version")"; then
+                echo "::warning::#$pr version $other cannot be ordered against $version; deferred to its recorded source"
+                continue
+            fi
+            if [[ "$order" -ge 0 ]]; then
+                echo "#$pr is $other, not older than the update's $version; deferred to its recorded source"
                 continue
             fi
             newer="$(jq -r --arg head "$BRANCH_PREFIX$environment$suffix-$version" --arg base "$ENVIRONMENT_PREFIX$environment" --arg version "$version" \
@@ -372,6 +421,7 @@ label_update() {
             refuse "$pr" "$labelled" "superseded by ${newer:-the pull request for \`$version\`}, which the update from \`$commit\` (#$(jq -r .number <<< "$candidate")) goes into; the gatekeepers only merge that one. Merge this one by hand only to deploy \`$other\` first; it is closed once a newer version is merged" || return 1
             continue
         fi
+        handled[$pr]=1
         verify "$pr" "$labelled" "$commit" "$candidate" "$chart_dir" || return 1
     done < <(jq -c '.[]' <<< "$open")
     [[ "$found" -gt 0 ]] || echo "No open hydration pull request for $chart: the update renders no change or is deployed"

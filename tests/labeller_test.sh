@@ -13,6 +13,8 @@ mkdir -p "$work"
 (
     api_list() { printf '%s\n' '[{"filename":"hydrated-manifests/demo/config.yaml","previous_filename":"hydrated-manifests/other/config.yaml"},{"filename":"hydrated-manifests/demo/values.yaml"}]'; }
     [[ "$(pull_files 1)" == $'hydrated-manifests/demo/config.yaml\nhydrated-manifests/demo/values.yaml\nhydrated-manifests/other/config.yaml' ]]
+    api_list() { jq -n '[range(3000) | {filename: "Chart.yaml"}]'; }
+    if pull_files 1 > /dev/null 2>&1; then exit 1; fi
 )
 echo 'Renamed files include both source and destination paths in scope checks'
 
@@ -159,6 +161,19 @@ BUNDLE_PATCHES=true
 BUNDLE_PATCHES=false
 [[ "$(branch_version abc tests/fixtures/single-chart)" == 1.4.2 ]]
 echo 'The branch version follows primaryDependency, Chart.lock and bundle-patches-in-one-pr'
+
+[[ "$(version_order 1.2.3-rc.1 1.2.3)" == -1 ]]
+[[ "$(version_order 1.2.3 1.2.3-rc.1)" == 1 ]]
+[[ "$(version_order 1.2.3-alpha.2 1.2.3-alpha.10)" == -1 ]]
+[[ "$(version_order 1.2.3-9 1.2.3-alpha)" == -1 ]]
+[[ "$(version_order 1.2.3-alpha 1.2.3-alpha.1)" == -1 ]]
+[[ "$(version_order 1.2.3+build.1 1.2.3+build.2)" == 0 ]]
+[[ "$(version_order 1.2.x 1.10.x)" == -1 ]]
+[[ "$(version_order 9007199254740993.0.0 9007199254740992.0.0)" == 1 ]]
+if version_order 1.2.3-01 1.2.3 > /dev/null 2>&1; then exit 1; fi
+if version_order 1.2.x 1.2.3 > /dev/null 2>&1; then exit 1; fi
+if version_order invalid 1.2.3 > /dev/null 2>&1; then exit 1; fi
+echo 'Version ordering follows SemVer prerelease precedence and separately compares bundled branches'
 
 check_workflow_revision() (
     local metadata="$1" expected="$2"

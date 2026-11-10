@@ -39,7 +39,7 @@ gh() {
     local result
     case "$method $path" in
         "GET pulls") result="$(jq '[.[] | select(.state == "open")]' "$state/pulls.json")" ;;
-        GET\ pulls/*/files) number="${path#pulls/}"; result="$(pull_file_list "${number%/files}")" ;;
+        GET\ pulls/*/files) number="${path#pulls/}"; result="$(pull_file_list "${number%/files}" | jq '.[0:3000]')" ;;
         GET\ pulls/*) result="$(jq --argjson n "${path#pulls/}" '.[] | select(.number == $n)' "$state/pulls.json")" ;;
         GET\ issues/*/comments) number="${path#issues/}"; result="$(jq --argjson n "${number%/comments}" '[.[] | select(.issue == $n)]' "$state/comments.json")" ;;
         GET\ commits/*/pulls) number="${path#commits/}"; result="$(jq --arg sha "${number%/pulls}" '[.[] | select(.merge_commit_sha == $sha)]' "$state/pulls.json")" ;;
@@ -370,3 +370,120 @@ expect_labelled 402
 expect_comment 401 "Source: \`$c1\` (#41"
 expect_comment 402 "Source: \`$c2\` (#42"
 echo 'multi-chart: adjacent updates of apps/api and apps-api use independent render caches'
+
+new_repository api-limit
+CHARTS_ROOT=. DISCOVERY_DEPTH=1 BUNDLE_PATCHES=true LAYOUT=""
+chart . demo release
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev .
+c1="$(renovate_update 51 . 1.0.1)"
+pull=hydration-pull-request/dev-1.0.x
+hydrate "$pull" environments/dev "$c1" dev .
+git worktree add --quiet "$fixture/branch" "$pull"
+for (( index = 0; index < 3000; index++ )); do
+    printf 'unverified\n' > "$fixture/branch/hydrated-manifests/extra-$index.txt"
+done
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: outside}\n' > "$fixture/branch/zzz-outside.yaml"
+(cd "$fixture/branch" && commit 'More than 3000 PR files with an out-of-scope tail' > /dev/null)
+git worktree remove --force "$fixture/branch"
+open_pull 501 "$pull" dev
+api_list "repos/$repo/pulls/501/files?per_page=100" | jq -e 'length == 3000 and all(.[]; .filename != "zzz-outside.yaml")' > /dev/null
+run_labeller "$c1"
+expect_unlabelled 501
+expect_comment 501 'it changes files outside `hydrated-manifests`'
+echo 'scope: complete Git diffs catch out-of-scope changes omitted by the 3000-file API limit'
+
+new_repository merge-result
+CHARTS_ROOT=. DISCOVERY_DEPTH=1 LAYOUT=""
+chart . demo release
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: stable}\n' > templates/config.yaml
+printf '{{ if eq .Chart.Version "1.0.1" }}\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: base-only}\n{{ end }}\n' > templates/base-only.yaml
+printf '{{ if eq .Chart.Version "1.0.2" }}\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: head-only}\n{{ end }}\n' > templates/head-only.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev .
+c1="$(renovate_update 61 . 1.0.1)"
+c2="$(renovate_update 62 . 1.0.2)"
+pull=hydration-pull-request/dev-1.0.x
+hydrate "$pull" environments/dev "$c2" dev .
+open_pull 601 "$pull" dev
+run_labeller "$c2"
+expect_labelled 601
+hydrate environments/dev environments/dev "$c1" dev .
+open_pull 601 "$pull" dev
+merge_tree="$(git merge-tree --write-tree environments/dev "$pull")"
+git cat-file -e "$merge_tree:hydrated-manifests/release/demo/templates/base-only.yaml"
+run_labeller "$c2"
+expect_unlabelled 601
+expect_comment 601 'base-only.yaml'
+echo 'merge: a base-only resource surviving a clean three-way merge removes stale eligibility'
+
+git worktree add --quiet "$fixture/branch" environments/dev
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: conflicting-head-resource}\n' > "$fixture/branch/hydrated-manifests/release/demo/templates/head-only.yaml"
+(cd "$fixture/branch" && commit 'Conflicting resource added on the environment branch' > /dev/null)
+git worktree remove --force "$fixture/branch"
+open_pull 601 "$pull" dev
+run_labeller "$c2"
+expect_unlabelled 601
+expect_comment 601 'its merge into the checked base has conflicts'
+echo 'merge: conflicting environment and PR changes cannot receive the trusted label'
+
+new_repository historical-input
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 LAYOUT=""
+chart infrastructure/demo demo release
+printf 'setting: initial\n' > old-values.yaml
+printf 'setting: manual\n' > new-values.yaml
+yq -i '.environments.dev.valueFiles = ["../../old-values.yaml"]' infrastructure/demo/helm-config.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+c1="$(renovate_update 71 infrastructure/demo 1.0.1)"
+printf 'setting: manual\n' > old-values.yaml
+manual="$(commit 'Change the formerly referenced external values')"
+yq -i '.environments.dev.valueFiles = ["../../new-values.yaml"]' infrastructure/demo/helm-config.yaml
+commit 'Switch to an equivalent values file' > /dev/null
+c2="$(renovate_update 72 infrastructure/demo 1.0.2)"
+pull=hydration-pull-request/dev-1.0.x
+hydrate "$pull" environments/dev "$c2" dev infrastructure/demo
+open_pull 701 "$pull" dev
+run_labeller "$c2"
+expect_unlabelled 701
+expect_comment 701 "back to ${manual:0:7}, a commit that is not one and changes this environment"
+echo 'history: a manual change to a formerly referenced render input breaks the eligible chain'
+
+new_repository prereleases
+CHARTS_ROOT=. DISCOVERY_DEPTH=1 BUNDLE_PATCHES=false LAYOUT=""
+chart . demo release
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev .
+c1="$(renovate_update 81 . 1.2.3-rc.1)"
+hydrate hydration-pull-request/dev-1.2.3-rc.1 environments/dev "$c1" dev .
+open_pull 801 hydration-pull-request/dev-1.2.3-rc.1 dev
+c2="$(renovate_update 82 . 1.2.3)"
+hydrate hydration-pull-request/dev-1.2.3 environments/dev "$c2" dev .
+open_pull 802 hydration-pull-request/dev-1.2.3 dev
+run_labeller "$c1"
+expect_labelled 801
+[[ -z "$(comment_of 802)" ]]
+run_labeller "$c2"
+expect_unlabelled 801
+expect_comment 801 'superseded by #802 (`1.2.3`)'
+expect_labelled 802
+echo 'versions: a release candidate never supersedes its final release'
+
+git worktree add --quiet "$fixture/branch" environments/dev
+printf 'environment notes\n' > "$fixture/branch/README.md"
+(cd "$fixture/branch" && commit 'Advance the environment without changing the chart' > /dev/null)
+git worktree remove --force "$fixture/branch"
+open_pull 802 hydration-pull-request/dev-1.2.3 dev
+run_labeller "$c1"
+expect_labelled 802
+expect_comment 802 "Base: \`$(git rev-parse environments/dev)\`"
+expect_comment 802 "Source: \`$c2\` (#82"
+update_pull 82 '.labels = []'
+run_labeller "$c2"
+expect_unlabelled 802
+expect_comment 802 '#82 is not eligible'
+echo 'revalidation: skipped newer PRs refresh their base and lose trust when their source becomes ineligible'
