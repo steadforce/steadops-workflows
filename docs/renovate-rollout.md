@@ -115,15 +115,18 @@ hydration goldens byte for byte.
 ## What Is Verified
 
 - The source is a merged pull request by `renovate-author` with an eligible update
-  label and no `update:major`, changing only one discovered chart's `Chart.yaml`
-  and `Chart.lock`.
-- The pull request changes nothing outside the chart's manifest directory, and that
-  directory equals the chart rendered at the source commit.
+  label and no `update:major`. Both its complete PR file list and its integrated
+  commit delta must change only one discovered chart's `Chart.yaml` and `Chart.lock`;
+  potentially truncated API file lists are rejected.
+- Complete Git diffs and the actual three-way merge change nothing outside the
+  chart's manifest directory. The merge result equals the source render; conflicts
+  are refused.
 - The environment branch equals the chart rendered just before the update, or
   before an unbroken run of updates ending in it. A commit in between that is an
   eligible Renovate update of the same chart, or leaves the chart's render for the
-  environment unchanged, continues the run; commits that touch neither the chart,
-  its `file://` dependencies nor its value files are skipped.
+  environment unchanged, continues the run. All first-parent commits within the
+  verification window are examined. Earlier rebased commits of the same merged PR
+  are checked against the complete PR, so the boundary can precede its first commit.
 - An open pull request for an older version of the chart is superseded: it loses the
   label, its gatekeeper comments say so and `gatekeeper-blocked` is removed.
 

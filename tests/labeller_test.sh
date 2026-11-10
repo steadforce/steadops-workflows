@@ -59,6 +59,20 @@ pull_files() { printf '%s\n' Chart.yaml Chart.lock; }
 [[ "$(renovate_chart_dir "$candidate" HEAD)" == . ]]
 echo 'Eligibility checks the author, the update labels and the changed files'
 
+(
+    pull_files() {
+        if [[ -n "${2:-}" ]]; then printf '%s\n' infrastructure/demo/Chart.yaml;
+        else printf '%s\n' infrastructure/demo/Chart.yaml infrastructure/demo/values.yaml; fi
+    }
+    if renovate_chart_dir "$candidate" HEAD 2> /dev/null; then exit 1; fi
+    pull_files() {
+        if [[ -n "${2:-}" ]]; then printf '%s\n' infrastructure/demo/Chart.yaml infrastructure/demo/values.yaml;
+        else printf '%s\n' infrastructure/demo/Chart.yaml; fi
+    }
+    if renovate_chart_dir "$candidate" HEAD 2> /dev/null; then exit 1; fi
+)
+echo 'Eligibility checks the entire source PR as well as its integrated commit delta'
+
 # What a commit has to touch to change a chart's render: the chart, its file:// dependencies and value files outside it.
 cat > infrastructure/demo/Chart.yaml <<'EOF'
 apiVersion: v2
@@ -168,6 +182,10 @@ echo 'The branch version follows primaryDependency, Chart.lock and bundle-patche
 [[ "$(version_order 1.2.3-9 1.2.3-alpha)" == -1 ]]
 [[ "$(version_order 1.2.3-alpha 1.2.3-alpha.1)" == -1 ]]
 [[ "$(version_order 1.2.3+build.1 1.2.3+build.2)" == 0 ]]
+[[ "$(version_order 1.2.3-rc.x 1.2.3)" == -1 ]]
+[[ "$(version_order 1.2.3 1.2.3-rc.x)" == 1 ]]
+[[ "$(version_order 1.2.3+build.x 1.2.3)" == 0 ]]
+[[ "$(version_order 1.2.3-rc.x 1.2.3+build.x)" == -1 ]]
 [[ "$(version_order 1.2.x 1.10.x)" == -1 ]]
 [[ "$(version_order 9007199254740993.0.0 9007199254740992.0.0)" == 1 ]]
 if version_order 1.2.3-01 1.2.3 > /dev/null 2>&1; then exit 1; fi

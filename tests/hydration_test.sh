@@ -42,7 +42,7 @@ gh() {
         GET\ pulls/*/files) number="${path#pulls/}"; result="$(pull_file_list "${number%/files}" | jq '.[0:3000]')" ;;
         GET\ pulls/*) result="$(jq --argjson n "${path#pulls/}" '.[] | select(.number == $n)' "$state/pulls.json")" ;;
         GET\ issues/*/comments) number="${path#issues/}"; result="$(jq --argjson n "${number%/comments}" '[.[] | select(.issue == $n)]' "$state/comments.json")" ;;
-        GET\ commits/*/pulls) number="${path#commits/}"; result="$(jq --arg sha "${number%/pulls}" '[.[] | select(.merge_commit_sha == $sha)]' "$state/pulls.json")" ;;
+        GET\ commits/*/pulls) number="${path#commits/}"; result="$(jq --arg sha "${number%/pulls}" '[.[] | select(.merge_commit_sha == $sha or ((.integrated_commits // []) | index($sha) != null))]' "$state/pulls.json")" ;;
         POST\ issues/*/comments)
             number="${path#issues/}"
             jq --argjson n "${number%/comments}" --arg body "$body" --arg user "$LABELLER" \
@@ -72,7 +72,7 @@ pull_file_list() {
     local pull
     pull="$(jq --argjson n "$1" '.[] | select(.number == $n)' "$state/pulls.json")"
     if [[ "$(jq -r '.merge_commit_sha // ""' <<< "$pull")" != "" ]]; then
-        git diff --name-status --find-renames "$(jq -r .merge_commit_sha <<< "$pull")^1" "$(jq -r .merge_commit_sha <<< "$pull")"
+        git diff --name-status --find-renames "$(jq -r '.source_base_sha // (.merge_commit_sha + "^1")' <<< "$pull")" "$(jq -r .merge_commit_sha <<< "$pull")"
     else
         git diff --name-status --find-renames "$(jq -r .base.sha <<< "$pull")...$(jq -r .head.sha <<< "$pull")"
     fi | jq -Rn '[inputs | split("\t") |
@@ -458,9 +458,9 @@ chart . demo release
 c0="$(commit initial)"
 environment_branch
 hydrate environments/dev environments/dev "$c0" dev .
-c1="$(renovate_update 81 . 1.2.3-rc.1)"
-hydrate hydration-pull-request/dev-1.2.3-rc.1 environments/dev "$c1" dev .
-open_pull 801 hydration-pull-request/dev-1.2.3-rc.1 dev
+c1="$(renovate_update 81 . 1.2.3-rc.x)"
+hydrate hydration-pull-request/dev-1.2.3-rc.x environments/dev "$c1" dev .
+open_pull 801 hydration-pull-request/dev-1.2.3-rc.x dev
 c2="$(renovate_update 82 . 1.2.3)"
 hydrate hydration-pull-request/dev-1.2.3 environments/dev "$c2" dev .
 open_pull 802 hydration-pull-request/dev-1.2.3 dev
@@ -487,3 +487,44 @@ run_labeller "$c2"
 expect_unlabelled 802
 expect_comment 802 '#82 is not eligible'
 echo 'revalidation: skipped newer PRs refresh their base and lose trust when their source becomes ineligible'
+
+for earlier_change in chart-only values template other-chart; do
+    new_repository "rebased-$earlier_change"
+    CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+    chart infrastructure/demo demo release
+    if [[ "$earlier_change" == other-chart ]]; then chart infrastructure/other other other; fi
+    c0="$(commit initial)"
+    environment_branch
+    hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+    case "$earlier_change" in
+        chart-only) yq -i '.version = "1.0.1"' infrastructure/demo/Chart.yaml ;;
+        values) printf 'setting: production-only\n' > infrastructure/demo/values-prod.yaml ;;
+        template) printf '{{/* Render-neutral template change */}}\n' > infrastructure/demo/templates/notes.yaml ;;
+        other-chart) yq -i '.version = "1.0.1"' infrastructure/other/Chart.yaml ;;
+    esac
+    first="$(commit 'First rebased commit in the source PR')"
+    tip="$(renovate_update 91 infrastructure/demo 1.0.2)"
+    update_pull 91 --arg base "$c0" --arg first "$first" --arg tip "$tip" \
+        '.source_base_sha = $base | .integrated_commits = [$first, $tip]'
+    pull=hydration-pull-request/dev-1.0.x
+    if [[ "$earlier_change" == other-chart ]]; then pull=hydration-pull-request/dev-demo-1.0.x; fi
+    hydrate "$pull" environments/dev "$tip" dev infrastructure/demo
+    open_pull 901 "$pull" dev
+    [[ "$(pull_files 91 "$tip")" == infrastructure/demo/Chart.yaml ]]
+    [[ -z "$(merged_pull_request "$first")" ]]
+    [[ "$(merged_pull_request "$first" "$tip" | jq -r .number)" == 91 ]]
+    run_labeller "$tip"
+    if [[ "$earlier_change" == chart-only ]]; then
+        expect_labelled 901
+        expect_comment 901 "Source: \`$tip\` (#91"
+        expect_comment 901 'Carries this update and nothing else'
+    else
+        expect_unlabelled 901
+        update_pull 901 '.labels = [{name: "renovate-hydration"}]'
+        upsert_comment 901 "Source: \`$tip\` (#91)."
+        run_labeller "$tip"
+        expect_unlabelled 901
+        expect_comment 901 '#91 is not eligible'
+    fi
+    echo "rebased PR: $earlier_change checks the entire PR and the before-first-commit render boundary"
+done

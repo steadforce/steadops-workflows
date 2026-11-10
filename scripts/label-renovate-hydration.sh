@@ -75,8 +75,10 @@ release_from_gatekeepers() {
     gh pr edit "$pr" --repo "$repo" --remove-label "$BLOCKED" > /dev/null 2>&1 || true
 }
 merged_pull_request() {
-    api_list "repos/$repo/commits/$1/pulls?per_page=100" | jq -c --arg branch "$SOURCE_BRANCH" --arg commit "$1" \
-        '[.[] | select(.merged_at != null and .base.ref == $branch and .merge_commit_sha == $commit)] | first // empty'
+    api_list "repos/$repo/commits/$1/pulls?per_page=100" | jq -c --arg branch "$SOURCE_BRANCH" --arg commit "$1" --arg integrated "${2:-}" \
+        '[.[] | select(.merged_at != null and .base.ref == $branch)]
+        | (map(select(.merge_commit_sha == $commit)) + map(select($integrated != "" and .merge_commit_sha == $integrated)))
+        | first // empty'
 }
 
 # A path inside a chart directory, which is . for a chart at the repository root.
@@ -120,6 +122,7 @@ branch_version() {
 version_order() {
     jq -ner --arg left "$1" --arg right "$2" '
         def numeric: [length, .];
+        def is_bundled: test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.x$");
         def bundled:
             capture("^(?<major>0|[1-9][0-9]*)\\.(?<minor>0|[1-9][0-9]*)\\.x$")
             | [(.major | numeric), (.minor | numeric)];
@@ -130,9 +133,9 @@ version_order() {
             | [($version.major | numeric), ($version.minor | numeric), ($version.patch | numeric),
                (if $pre == [] then 1 else 0 end),
                ($pre | map(if test("^[0-9]+$") then [0, numeric] else [1, .] end))];
-        if ($left | endswith(".x")) and ($right | endswith(".x")) then
+        if ($left | is_bundled) and ($right | is_bundled) then
             [($left | bundled), ($right | bundled)]
-        elif ($left | endswith(".x")) or ($right | endswith(".x")) then
+        elif ($left | is_bundled) or ($right | is_bundled) then
             error("bundled and concrete versions are not comparable")
         else [($left | semver), ($right | semver)] end
         | select(length == 2)
@@ -246,7 +249,7 @@ hydrated() {
 
 # The chart directory an eligible Renovate pull request merged as a commit updates, or the reason on stderr.
 renovate_chart_dir() {
-    local pull="$1" commit="$2" files directory
+    local pull="$1" commit="$2" files integrated directory
     if [[ "$(jq -r .user.login <<< "$pull")" != "$RENOVATE_AUTHOR" ]]; then
         echo "it was opened by $(jq -r .user.login <<< "$pull"), not $RENOVATE_AUTHOR" >&2
         return 1
@@ -256,7 +259,9 @@ renovate_chart_dir() {
         echo "its update type is not one of $(jq -r 'join(", ")' <<< "$ELIGIBLE_UPDATE_LABELS")" >&2
         return 1
     fi
-    files="$(pull_files "$(jq -r .number <<< "$pull")" "$commit")" || return 1
+    files="$(pull_files "$(jq -r .number <<< "$pull")")" || return 1
+    integrated="$(pull_files "$(jq -r .number <<< "$pull")" "$commit")" || return 1
+    files="$(printf '%s\n%s\n' "$files" "$integrated" | LC_ALL=C sort -u)"
     directory="$(jq -Rsr 'split("\n") | map(select(length > 0))
         | if length > 0 and all(test("(^|/)Chart\\.(yaml|lock)$")) then
             map(split("/")[0:-1] | if length == 0 then "." else join("/") end) | unique | if length == 1 then .[0] else "" end
@@ -275,7 +280,7 @@ renovate_chart_dir() {
 # Whether pull request $1 is exactly the update merged as $2 of chart $3, or a run of Renovate updates ending in it.
 # 0 it is (HOLDS_HEAD, HOLDS_BASE, HOLDS_EARLIER); 1 it is not (HOLDS_REASON); 2 it could not be checked.
 holds() {
-    local pr="$1" source="$2" chart_dir="$3" pull environment directory path count=0 after deployed proposed merged before at link link_pr matched="" ended=""
+    local pr="$1" source="$2" chart_dir="$3" pull environment directory path count=0 after deployed proposed merged before at link link_pr update_tip="$2" matched="" ended=""
     local -a earlier=()
     HOLDS_HEAD="" HOLDS_BASE="" HOLDS_EARLIER="" HOLDS_REASON=""
     pull="$(gh api "repos/$repo/pulls/$pr")" || return 2
@@ -324,9 +329,10 @@ holds() {
     for link in $(git rev-list --first-parent --max-count="$MAX_CHAIN" "$source"); do
         git rev-parse --verify --quiet "$link^1" > /dev/null || break
         if [[ "$link" != "$source" ]]; then
-            link_pr="$(merged_pull_request "$link")" || return 2
+            link_pr="$(merged_pull_request "$link" "$update_tip")" || return 2
             if [[ -n "$link_pr" && "$(renovate_chart_dir "$link_pr" "$link" 2> /dev/null)" == "$chart_dir" ]]; then
-                earlier+=("#$(jq -r .number <<< "$link_pr")")
+                update_tip="$(jq -r .merge_commit_sha <<< "$link_pr")"
+                [[ "$update_tip" != "$link" ]] || earlier+=("#$(jq -r .number <<< "$link_pr")")
             else
                 at="$(rendered "$link" "$environment" "$chart_dir")" || return 2
                 before="$(rendered "$link^1" "$environment" "$chart_dir")" || return 2
