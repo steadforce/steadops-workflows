@@ -103,6 +103,26 @@ git add . && git -c user.name=test -c user.email=test@example.invalid commit --q
 [[ -z "$(input_key HEAD infrastructure/demo)" ]]
 echo 'Render inputs follow file:// dependencies recursively; their key ignores changes elsewhere and gives up outside the repository'
 
+# A symlink on or below an input leaves no key: its blob does not change with its target, and resolving it in the checkout would read another commit.
+mkdir -p "$temporary/symlinks" && cd "$temporary/symlinks"
+git init --quiet -b main
+mkdir -p infrastructure/demo shared
+printf 'apiVersion: v2\nname: demo\nversion: 1.0.0\n' > infrastructure/demo/Chart.yaml
+printf 'environments:\n  dev:\n    valueFiles: [values.yaml, ../../shared/link.yaml]\n' > infrastructure/demo/helm-config.yaml
+printf 'setting: plain\n' > infrastructure/demo/values.yaml
+printf 'setting: shared\n' > shared/values.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m plain
+[[ -n "$(input_key HEAD infrastructure/demo)" ]]
+ln -s values.yaml shared/link.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'symlinked value file'
+[[ -z "$(input_key HEAD infrastructure/demo)" ]]
+rm shared/link.yaml
+ln -s ../../shared/values.yaml infrastructure/demo/values.yaml.link
+git add -A && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'symlink inside the chart'
+[[ -z "$(input_key HEAD infrastructure/demo)" ]]
+[[ -n "$(input_key HEAD~2 infrastructure/demo)" ]]
+echo 'A symlink on or below a render input disables the shared render cache for that commit'
+
 # Canonical comparison ignores key order and formatting, not content.
 mkdir -p "$temporary/first" "$temporary/second"
 printf 'kind: ConfigMap\napiVersion: v1\nmetadata: {name: demo}\ndata: {version: old}\n' > "$temporary/first/config.yaml"

@@ -155,6 +155,7 @@ version_order() {
         | if .[0] < .[1] then -1 elif .[0] > .[1] then 1 else 0 end'
 }
 # Every path a render of the chart at a commit reads: its directory, its file:// dependencies recursively and its value files.
+# Resolved as text (realpath -s), so nothing in the checkout of another commit leaks in; input_key gives up on symlinks.
 render_inputs() {
     local commit="$1" chart_dir="$2" path dependency
     local -a queue=("$chart_dir")
@@ -166,7 +167,7 @@ render_inputs() {
         seen[$path]=1
         printf '%s\n' "$path"
         while IFS= read -r dependency; do
-            dependency="$(realpath -m --relative-to=. "$(in_chart "$path" "$dependency")")"
+            dependency="$(realpath -m -s --relative-to=. "$(in_chart "$path" "$dependency")")"
             # Outside the repository nothing can be told about it.
             [[ "$dependency" != ../* && "$dependency" != .. ]] || return 1
             queue+=("$dependency")
@@ -174,15 +175,31 @@ render_inputs() {
             | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
     done
     while IFS= read -r path; do
-        path="$(realpath -m --relative-to=. "$(in_chart "$chart_dir" "$path")")"
+        path="$(realpath -m -s --relative-to=. "$(in_chart "$chart_dir" "$path")")"
         [[ "$path" != ../* && "$path" != .. ]] || return 1
         printf '%s\n' "$path"
     done < <(git show "$commit:$(in_chart "$chart_dir" helm-config.yaml)" 2> /dev/null | yq -N -r 'explode(.) | .environments[]?.valueFiles[]?')
 }
 # A key that changes whenever anything a render of the chart reads changes; empty when that cannot be told.
 input_key() {
-    local commit="$1" chart_dir="$2" inputs path object
+    local commit="$1" chart_dir="$2" inputs path prefix part object
+    local -a paths=() prefixes=() parts=()
     inputs="$(render_inputs "$commit" "$chart_dir" | LC_ALL=C sort -u)" || return 0
+    mapfile -t paths <<< "$inputs"
+    for path in "${paths[@]}"; do
+        prefix=""
+        IFS=/ read -ra parts <<< "$path"
+        for part in "${parts[@]}"; do
+            prefix="${prefix:+$prefix/}$part"
+            [[ "$prefix" == . ]] || prefixes+=("$prefix")
+        done
+    done
+    # Helm follows symlinks, and a symlink's blob does not change with its target: a commit that has one on or below an input renders every time.
+    # awk reads to the end: grep -q would stop early and fail the pipeline with SIGPIPE under pipefail.
+    if { [[ "${#prefixes[@]}" -eq 0 ]] || git ls-tree "$commit" -- "${prefixes[@]}"; git ls-tree -r "$commit" -- "${paths[@]}"; } \
+        | awk '$1 == "120000" { found = 1 } END { exit !found }'; then
+        return 0
+    fi
     while IFS= read -r path; do
         if [[ "$path" == . ]]; then
             object="$(git rev-parse --verify --quiet "$commit^{tree}")" || object=missing

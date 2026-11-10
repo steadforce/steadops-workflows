@@ -586,3 +586,25 @@ run_labeller "$c3"
 expect_unlabelled 601
 expect_comment 601 "back to ${shared_change:0:7}"
 echo 'budgets: an undeployed change to a file:// dependency outside the chart ends the run'
+
+# A symlinked values file: its blob names the target, not the content Helm reads, so a change to the target must still end the run.
+new_repository symlinks
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+mkdir -p common
+printf 'setting: shared\n' > common/values.yaml
+ln -s ../../common/values.yaml infrastructure/demo/values.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+printf 'setting: retargeted\n' > common/values.yaml
+target_change="$(commit 'Change the symlinked values')"
+c1="$(renovate_update 71 infrastructure/demo 1.0.1)"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 701 "$pull" dev
+run_labeller "$c1"
+expect_unlabelled 701
+expect_comment 701 "back to ${target_change:0:7}"
+echo 'symlinks: a change behind a symlinked values file ends the run'

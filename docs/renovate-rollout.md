@@ -131,8 +131,9 @@ hydration goldens byte for byte.
 - A commit is render-neutral without rendering when nothing a render reads changed:
   the chart directory, its `file://` dependencies recursively and its value files.
   Commits elsewhere in a monorepo therefore cost a few `git rev-parse` calls, not a
-  Helm run; a chart whose inputs reach outside the repository is rendered at every
-  commit.
+  Helm run. A chart whose inputs reach outside the repository, or a commit with a
+  symlink on or below one of them, is rendered at every commit instead: a symlink's
+  blob does not change when its target does.
 - An open pull request for an older version of the chart is superseded: it loses the
   label, its gatekeeper comments say so and `gatekeeper-blocked` is removed.
 
