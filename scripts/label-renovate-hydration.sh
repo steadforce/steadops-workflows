@@ -162,6 +162,35 @@ dependency_files() {
     done
     return 0
 }
+# The first absolute file:// dependency of a chart at a commit, followed through its dependencies inside the repository; nothing when there is none.
+absolute_dependency() {
+    local commit="$1" path dependency
+    local -a queue=("$2")
+    local -A seen=()
+    while [[ "${#queue[@]}" -gt 0 ]]; do
+        path="${queue[0]}"
+        queue=("${queue[@]:1}")
+        [[ -z "${seen[$path]:-}" ]] || continue
+        seen[$path]=1
+        while IFS= read -r dependency; do
+            if [[ "$dependency" == /* ]]; then
+                printf 'file://%s\n' "$dependency"
+                return 0
+            fi
+            dependency="$(realpath -m -s --relative-to=. "$(in_chart "$path" "$dependency")")"
+            [[ "$dependency" == ../* || "$dependency" == .. ]] || queue+=("$dependency")
+        done < <(dependency_files "$commit" "$path" \
+            | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
+    done
+}
+# Whether a chart renders at a commit as it did then; a render would read today's content of an absolute path, so it sets HOLDS_REASON.
+renderable() {
+    local dependency
+    dependency="$(absolute_dependency "$1" "$2")"
+    [[ -n "$dependency" ]] || return 0
+    HOLDS_REASON="the chart depends on \`$dependency\` at ${1:0:7}, an absolute path no commit records, so it cannot be rendered as it was"
+    return 1
+}
 # Every path a render of the chart at a commit reads: its directory, its file:// dependencies recursively and its value files.
 # Resolved as text (realpath -s), so nothing in the checkout of another commit leaks in; input_key gives up on symlinks.
 render_inputs() {
@@ -175,6 +204,8 @@ render_inputs() {
         seen[$path]=1
         printf '%s\n' "$path"
         while IFS= read -r dependency; do
+            # Helm reads file:///... as absolute; nothing in a commit's tree says what is there.
+            [[ "$dependency" != /* ]] || return 1
             dependency="$(realpath -m -s --relative-to=. "$(in_chart "$path" "$dependency")")"
             # Outside the repository nothing can be told about it.
             [[ "$dependency" != ../* && "$dependency" != .. ]] || return 1
@@ -430,6 +461,7 @@ holds() {
         HOLDS_REASON="\`$ENVIRONMENT_PREFIX$environment\` contains $entry, which the labeller does not accept"
         return 1
     fi
+    renderable "$source" "$chart_dir" || return 1
     after="$(rendered "$source" "$environment" "$chart_dir")" || return 2
     deployed="$(hydrated "refs/remotes/steadops-base/$pr" "$directory")" || return 2
     proposed="$(hydrated "$merged" "$directory")" || return 2
@@ -450,6 +482,7 @@ holds() {
                     earlier+=("#$(jq -r .number <<< "$link_pr")")
                 fi
             else
+                renderable "$link" "$chart_dir" && renderable "$link^1" "$chart_dir" || return 1
                 at="$(rendered "$link" "$environment" "$chart_dir")" || return 2
                 before="$(rendered "$link^1" "$environment" "$chart_dir")" || return 2
                 if ! cmp -s "$at" "$before"; then
@@ -459,6 +492,7 @@ holds() {
                 fi
             fi
         fi
+        renderable "$link^1" "$chart_dir" || return 1
         before="$(rendered "$link^1" "$environment" "$chart_dir")" || return 2
         if cmp -s "$before" "$deployed"; then
             matched="$link"

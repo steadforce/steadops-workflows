@@ -660,3 +660,25 @@ run_labeller "$c1"
 expect_unlabelled 801
 expect_comment 801 '(120000 blob), which the labeller does not accept'
 echo 'names: a symlink in the manifests refuses the labelled pull request instead of leaving it labelled'
+
+# An absolute file:// dependency would make every older render read today's content, so the pull request is refused rather than checked.
+new_repository absolute
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+mkdir -p "$fixture/outside/templates"
+printf 'apiVersion: v2\nname: outside\nversion: 1.0.0\n' > "$fixture/outside/Chart.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: outside}\n' > "$fixture/outside/templates/outside.yaml"
+yq -i ".dependencies = [{\"name\": \"outside\", \"version\": \"1.0.0\", \"repository\": \"file://$fixture/outside\"}]" infrastructure/demo/Chart.yaml
+yq -i '.primaryDependency = "outside"' infrastructure/demo/helm-config.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+c1="$(renovate_update 91 infrastructure/demo 1.0.1)"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 911 "$pull" dev
+run_labeller "$c1"
+expect_unlabelled 911
+expect_comment 911 "the chart depends on \`file://$fixture/outside\`"
+echo 'absolute: a chart with an absolute file:// dependency is refused, not checked against today'"'"'s content'

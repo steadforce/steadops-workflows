@@ -134,6 +134,9 @@ hydration goldens byte for byte.
   Helm run. A chart whose inputs reach outside the repository, or a commit with a
   symlink on or below one of them, is rendered at every commit instead: a symlink's
   blob does not change when its target does.
+- A chart with an absolute `file://` dependency, directly or through another
+  dependency, is refused: a render at an older commit would read today's content of
+  that path, so no history of it can be checked.
 - The manifests of the merge result and of the environment branch hold only regular
   files with plain names. A symlink, a submodule or a name with a control character
   refuses the pull request, label and all: it is what the pull request brought in, not

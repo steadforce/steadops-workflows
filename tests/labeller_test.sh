@@ -141,6 +141,26 @@ git add . && git -c user.name=test -c user.email=test@example.invalid commit --q
 [[ -n "$key" && "$(input_key HEAD infrastructure/legacy)" != "$key" ]]
 echo 'Render inputs follow file:// dependencies listed in requirements.yaml as well'
 
+# Helm reads file:///... as an absolute path, which no commit records; it is found through dependencies and leaves no render key.
+mkdir -p "$temporary/absolute" && cd "$temporary/absolute"
+git init --quiet -b main
+mkdir -p infrastructure/demo charts/shared
+printf 'apiVersion: v2\nname: demo\nversion: 1.0.0\ndependencies:\n- name: shared\n  version: 1.0.0\n  repository: file://../../charts/shared\n' > infrastructure/demo/Chart.yaml
+printf 'environments:\n  dev: {}\n' > infrastructure/demo/helm-config.yaml
+printf 'apiVersion: v2\nname: shared\nversion: 1.0.0\n' > charts/shared/Chart.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m relative
+[[ -z "$(absolute_dependency HEAD infrastructure/demo)" ]]
+renderable HEAD infrastructure/demo
+[[ -n "$(input_key HEAD infrastructure/demo)" ]]
+printf 'dependencies:\n- name: outside\n  version: 1.0.0\n  repository: file:///opt/charts/outside\n' > charts/shared/requirements.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m absolute
+[[ "$(absolute_dependency HEAD infrastructure/demo)" == file:///opt/charts/outside ]]
+if renderable HEAD infrastructure/demo; then exit 1; fi
+[[ "$HOLDS_REASON" == *'`file:///opt/charts/outside`'* ]]
+[[ -z "$(input_key HEAD infrastructure/demo)" ]]
+renderable HEAD~1 infrastructure/demo
+echo 'An absolute file:// dependency, also two charts down, makes a commit unrenderable and leaves no render key'
+
 # Canonical comparison ignores key order and formatting, not content.
 mkdir -p "$temporary/first" "$temporary/second"
 printf 'kind: ConfigMap\napiVersion: v1\nmetadata: {name: demo}\ndata: {version: old}\n' > "$temporary/first/config.yaml"
