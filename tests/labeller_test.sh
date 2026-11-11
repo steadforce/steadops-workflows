@@ -123,6 +123,24 @@ git add -A && git -c user.name=test -c user.email=test@example.invalid commit --
 [[ -n "$(input_key HEAD~2 infrastructure/demo)" ]]
 echo 'A symlink on or below a render input disables the shared render cache for that commit'
 
+# apiVersion v1 charts list their dependencies in requirements.yaml, which Helm 3 still reads; a key blind to them reuses stale renders.
+mkdir -p "$temporary/requirements" && cd "$temporary/requirements"
+git init --quiet -b main
+mkdir -p infrastructure/legacy charts/old charts/older
+printf 'apiVersion: v1\nname: legacy\nversion: 1.0.0\n' > infrastructure/legacy/Chart.yaml
+printf 'dependencies:\n- name: old\n  version: 1.0.0\n  repository: file://../../charts/old\n' > infrastructure/legacy/requirements.yaml
+printf 'environments:\n  dev: {}\n' > infrastructure/legacy/helm-config.yaml
+printf 'apiVersion: v1\nname: old\nversion: 1.0.0\n' > charts/old/Chart.yaml
+printf 'dependencies:\n- name: older\n  version: 1.0.0\n  repository: file://../older\n' > charts/old/requirements.yaml
+printf 'apiVersion: v1\nname: older\nversion: 1.0.0\n' > charts/older/Chart.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m legacy
+[[ "$(render_inputs HEAD infrastructure/legacy | LC_ALL=C sort -u | paste -sd' ')" == "charts/old charts/older infrastructure/legacy" ]]
+key="$(input_key HEAD infrastructure/legacy)"
+printf 'replicas: 2\n' > charts/older/values.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'change a requirements.yaml dependency'
+[[ -n "$key" && "$(input_key HEAD infrastructure/legacy)" != "$key" ]]
+echo 'Render inputs follow file:// dependencies listed in requirements.yaml as well'
+
 # Canonical comparison ignores key order and formatting, not content.
 mkdir -p "$temporary/first" "$temporary/second"
 printf 'kind: ConfigMap\napiVersion: v1\nmetadata: {name: demo}\ndata: {version: old}\n' > "$temporary/first/config.yaml"

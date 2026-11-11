@@ -154,6 +154,14 @@ version_order() {
         | select(length == 2)
         | if .[0] < .[1] then -1 elif .[0] > .[1] then 1 else 0 end'
 }
+# A chart's dependency lists at a commit: Chart.yaml, and requirements.yaml, which Helm still reads for apiVersion v1 charts.
+dependency_files() {
+    local file
+    for file in Chart.yaml requirements.yaml; do
+        git show "$1:$(in_chart "$2" "$file")" 2> /dev/null && printf '\n---\n'
+    done
+    return 0
+}
 # Every path a render of the chart at a commit reads: its directory, its file:// dependencies recursively and its value files.
 # Resolved as text (realpath -s), so nothing in the checkout of another commit leaks in; input_key gives up on symlinks.
 render_inputs() {
@@ -171,7 +179,7 @@ render_inputs() {
             # Outside the repository nothing can be told about it.
             [[ "$dependency" != ../* && "$dependency" != .. ]] || return 1
             queue+=("$dependency")
-        done < <(git show "$commit:$(in_chart "$path" Chart.yaml)" 2> /dev/null \
+        done < <(dependency_files "$commit" "$path" \
             | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
     done
     while IFS= read -r path; do
