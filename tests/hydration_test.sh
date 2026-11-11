@@ -682,3 +682,46 @@ run_labeller "$c1"
 expect_unlabelled 911
 expect_comment 911 "the chart depends on \`file://$fixture/outside\`"
 echo 'absolute: a chart with an absolute file:// dependency is refused, not checked against today'"'"'s content'
+
+# Hydration runs finish out of order: a run for an older commit, or one whose newer update is not hydrated yet, keeps a valid label.
+new_repository ordering
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+c1="$(renovate_update 41 infrastructure/demo 1.0.1)"
+c2="$(renovate_update 42 infrastructure/demo 1.0.2)"
+hydrate "$pull" environments/dev "$c2" dev infrastructure/demo
+open_pull 401 "$pull" dev
+run_labeller "$c2"
+expect_labelled 401
+expect_comment 401 "Source: \`$c2\` (#42"
+run_labeller "$c1"
+expect_labelled 401
+expect_comment 401 "Source: \`$c2\` (#42"
+echo 'ordering: a delayed run for an older commit leaves a label given for a newer update'
+
+c3="$(renovate_update 43 infrastructure/demo 1.0.3)"
+run_labeller "$c3"
+expect_labelled 401
+expect_comment 401 "Source: \`$c2\` (#42"
+grep -q 'its label stays' "$fixture/log"
+hydrate "$pull" environments/dev "$c3" dev infrastructure/demo
+open_pull 401 "$pull" dev
+run_labeller "$c3"
+expect_labelled 401
+expect_comment 401 "Source: \`$c3\` (#43"
+echo 'ordering: an update whose hydration has not landed yet keeps the label of the one before, then takes it over'
+
+git worktree add --quiet "$fixture/branch" "$pull"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: extra}\n' > "$fixture/branch/hydrated-manifests/demo/extra.yaml"
+(cd "$fixture/branch" && commit 'Add extra' > /dev/null)
+git worktree remove --force "$fixture/branch"
+open_pull 401 "$pull" dev
+c4="$(renovate_update 44 infrastructure/demo 1.0.4)"
+run_labeller "$c4"
+expect_unlabelled 401
+echo 'ordering: the fallback to the recorded update still refuses a pull request that carries neither'

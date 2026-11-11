@@ -145,6 +145,15 @@ hydration goldens byte for byte.
 - An open pull request for an older version of the chart is superseded: it loses the
   label, its gatekeeper comments say so and `gatekeeper-blocked` is removed.
 
+Hydration runs can finish out of order. A run for an older commit leaves a pull
+request labelled for a newer update to the check against that update, and a pull
+request whose newer update is not hydrated yet keeps its label while the update it
+was labelled for still holds.
+
+Render input paths are resolved one component at a time against the commit's tree,
+as the filesystem would; a symlink anywhere on the way, also behind a `..`, leaves
+the commit without a render key.
+
 A render that fails three times in a row, typically a chart repository timing out,
 leaves the pull request as it is until the next run instead of refusing it. So does
 a deployed state further back than 100 commits: running out of history is no

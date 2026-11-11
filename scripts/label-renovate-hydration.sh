@@ -177,8 +177,10 @@ absolute_dependency() {
                 printf 'file://%s\n' "$dependency"
                 return 0
             fi
-            dependency="$(realpath -m -s --relative-to=. "$(in_chart "$path" "$dependency")")"
-            [[ "$dependency" == ../* || "$dependency" == .. ]] || queue+=("$dependency")
+            # Beyond the repository or a symlink it cannot be followed; render_inputs then leaves the commit without a key.
+            if dependency="$(resolve_path "$commit" "$path" "$dependency")"; then
+                queue+=("$dependency")
+            fi
         done < <(dependency_files "$commit" "$path" \
             | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
     done
@@ -191,8 +193,33 @@ renderable() {
     HOLDS_REASON="the chart depends on \`$dependency\` at ${1:0:7}, an absolute path no commit records, so it cannot be rendered as it was"
     return 1
 }
+# A path relative to a directory, resolved one component at a time against a commit's tree as the filesystem would; fails outside the repository or through a symlink.
+resolve_path() {
+    local commit="$1" part mode
+    local -a stack=() parts=()
+    [[ "$2" == . ]] || IFS=/ read -ra stack <<< "$2"
+    IFS=/ read -ra parts <<< "$3"
+    for part in "${parts[@]}"; do
+        case "$part" in
+            ""|.) ;;
+            ..)
+                [[ "${#stack[@]}" -gt 0 ]] || return 1
+                unset 'stack[-1]' ;;
+            *)
+                stack+=("$part")
+                # A symlink's .. is its target's parent, which text resolution would miss.
+                mode="$(IFS=/; git ls-tree "$commit" -- "${stack[*]}" | cut -d' ' -f1)"
+                [[ "$mode" != 120000 ]] || return 1 ;;
+        esac
+    done
+    if [[ "${#stack[@]}" -eq 0 ]]; then
+        printf '.\n'
+    else
+        (IFS=/; printf '%s\n' "${stack[*]}")
+    fi
+}
 # Every path a render of the chart at a commit reads: its directory, its file:// dependencies recursively and its value files.
-# Resolved as text (realpath -s), so nothing in the checkout of another commit leaks in; input_key gives up on symlinks.
+# Resolved against the commit's tree, never the checkout; a symlink on the way leaves no key.
 render_inputs() {
     local commit="$1" chart_dir="$2" path dependency
     local -a queue=("$chart_dir")
@@ -206,16 +233,13 @@ render_inputs() {
         while IFS= read -r dependency; do
             # Helm reads file:///... as absolute; nothing in a commit's tree says what is there.
             [[ "$dependency" != /* ]] || return 1
-            dependency="$(realpath -m -s --relative-to=. "$(in_chart "$path" "$dependency")")"
-            # Outside the repository nothing can be told about it.
-            [[ "$dependency" != ../* && "$dependency" != .. ]] || return 1
+            dependency="$(resolve_path "$commit" "$path" "$dependency")" || return 1
             queue+=("$dependency")
         done < <(dependency_files "$commit" "$path" \
             | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
     done
     while IFS= read -r path; do
-        path="$(realpath -m -s --relative-to=. "$(in_chart "$chart_dir" "$path")")"
-        [[ "$path" != ../* && "$path" != .. ]] || return 1
+        path="$(resolve_path "$commit" "$chart_dir" "$path")" || return 1
         printf '%s\n' "$path"
     done < <(git show "$commit:$(in_chart "$chart_dir" helm-config.yaml)" 2> /dev/null | yq -N -r 'explode(.) | .environments[]?.valueFiles[]?')
 }
@@ -543,8 +567,23 @@ refuse() {
 }
 # Checks a pull request and labels or refuses it; a failed check leaves it as it is until the next run.
 verify() {
-    local pr="$1" labelled="$2" source="$3" candidate="$4" chart_dir="$5" status=0
+    local pr="$1" labelled="$2" source="$3" candidate="$4" chart_dir="$5" recorded="${6:-}" status=0 fallback=0 reason older
     holds "$pr" "$source" "$chart_dir" || status=$?
+    # A newer update's hydration may still be running: while the update the label was given for still holds, the label stays.
+    if [[ "$status" -eq 1 && "$labelled" == true && -n "$recorded" ]]; then
+        reason="$HOLDS_REASON"
+        older="$(merged_pull_request "$recorded")" || return 1
+        if [[ -n "$older" && "$(renovate_chart_dir "$older" "$recorded" 2> /dev/null)" == "$chart_dir" ]]; then
+            holds "$pr" "$recorded" "$chart_dir" || fallback=$?
+            if [[ "$fallback" -eq 0 ]]; then
+                echo "#$pr does not carry the update from ${source:0:7} yet, still the one from ${recorded:0:7}; its label stays"
+                accept "$pr" true "$recorded" "$(jq -r .number <<< "$older")" "$(chart_name "$recorded" "$chart_dir")"
+                return
+            fi
+            [[ "$fallback" -eq 1 ]] || status="$fallback"
+        fi
+        HOLDS_REASON="$reason"
+    fi
     case "$status" in
         0) echo "#$pr carries the update from ${source:0:7}${HOLDS_EARLIER:+ with $HOLDS_EARLIER}"
            accept "$pr" "$labelled" "$source" "$(jq -r .number <<< "$candidate")" "$(chart_name "$source" "$chart_dir")" ;;
@@ -555,7 +594,7 @@ verify() {
 
 # Checks the hydration pull requests of one Renovate update, and takes the label off older versions it supersedes.
 label_update() {
-    local commit="$1" candidate="$2" chart_dir="$3" chart suffix="" pull pr environment labelled version found=0 other newer order
+    local commit="$1" candidate="$2" chart_dir="$3" chart suffix="" pull pr environment labelled version found=0 other newer order recorded
     chart="$(chart_name "$commit" "$chart_dir")"
     ! multi_chart_at "$commit" || suffix="-$chart"
     while IFS= read -r pull; do
@@ -587,8 +626,15 @@ label_update() {
             refuse "$pr" "$labelled" "superseded by ${newer:-the pull request for \`$version\`}, which the update from \`$commit\` (#$(jq -r .number <<< "$candidate")) goes into; the gatekeepers only merge that one. Merge this one by hand only to deploy \`$other\` first; it is closed once a newer version is merged" || return 1
             continue
         fi
+        # A delayed run for an older commit leaves a pull request labelled for a newer update to the check against that update below.
+        recorded="$(source_of "$pr")" || return 1
+        if [[ -n "$recorded" && "$recorded" != "$commit" ]] && git merge-base --is-ancestor "$commit" "$recorded" 2> /dev/null; then
+            echo "#$pr carries the update from ${recorded:0:7}, newer than ${commit:0:7}; checked against that one"
+            continue
+        fi
         handled[$pr]=1
-        verify "$pr" "$labelled" "$commit" "$candidate" "$chart_dir" || return 1
+        [[ -z "$recorded" ]] || git merge-base --is-ancestor "$recorded" "$commit" 2> /dev/null || recorded=""
+        verify "$pr" "$labelled" "$commit" "$candidate" "$chart_dir" "$recorded" || return 1
     done < <(jq -c '.[]' <<< "$open")
     [[ "$found" -gt 0 ]] || echo "No open hydration pull request for $chart: the update renders no change or is deployed"
 }

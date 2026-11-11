@@ -161,6 +161,25 @@ if renderable HEAD infrastructure/demo; then exit 1; fi
 renderable HEAD~1 infrastructure/demo
 echo 'An absolute file:// dependency, also two charts down, makes a commit unrenderable and leaves no render key'
 
+# A .. after a symlink leads to its target's parent; resolved as text it would hash a file Helm never reads.
+mkdir -p "$temporary/dotdot" && cd "$temporary/dotdot"
+git init --quiet -b main
+mkdir -p infrastructure/demo infrastructure/link elsewhere/dir
+printf 'apiVersion: v2\nname: demo\nversion: 1.0.0\n' > infrastructure/demo/Chart.yaml
+printf 'environments:\n  dev:\n    valueFiles: [../link/../values.yaml]\n' > infrastructure/demo/helm-config.yaml
+touch infrastructure/link/.keep infrastructure/values.yaml elsewhere/values.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'real directory'
+[[ "$(resolve_path HEAD infrastructure/demo ../link/../values.yaml)" == infrastructure/values.yaml ]]
+[[ "$(resolve_path HEAD . infrastructure/demo/../demo)" == infrastructure/demo ]]
+if resolve_path HEAD infrastructure/demo ../../../outside > /dev/null; then exit 1; fi
+[[ -n "$(input_key HEAD infrastructure/demo)" ]]
+git rm --quiet -r infrastructure/link
+ln -s ../elsewhere/dir infrastructure/link
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'symlinked directory'
+if resolve_path HEAD infrastructure/demo ../link/../values.yaml > /dev/null; then exit 1; fi
+[[ -z "$(input_key HEAD infrastructure/demo)" ]]
+echo 'Paths resolve one component at a time against the commit, so a symlink hidden behind .. leaves no key'
+
 # Canonical comparison ignores key order and formatting, not content.
 mkdir -p "$temporary/first" "$temporary/second"
 printf 'kind: ConfigMap\napiVersion: v1\nmetadata: {name: demo}\ndata: {version: old}\n' > "$temporary/first/config.yaml"
