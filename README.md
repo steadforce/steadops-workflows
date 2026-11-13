@@ -201,6 +201,8 @@ whose manifests changed:
       `--skip-tests`.
    2. Adds the Argo CD annotations `sync-options: ServerSideApply=true` and `sync-wave: "-1"` to every
       CustomResourceDefinition. An existing `sync-options` value is extended, an existing `sync-wave` is kept.
+      Only files that hold a CRD are rewritten by `yq`; every other manifest is committed exactly as Helm renders
+      it, so a new `yq` release on the runner does not reformat it.
 
    A chart or environment that fails is reported and skipped. The others are still hydrated, and the job fails at
    the end.

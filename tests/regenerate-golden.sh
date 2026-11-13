@@ -78,17 +78,22 @@ for root_spec in "${ROOTS[@]}"; do
         --release-name \
         --skip-tests > /dev/null
 
-      find "$output_dir" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec yq -i '
-        select(.kind == "CustomResourceDefinition" and
-          .metadata.annotations["argocd.argoproj.io/sync-options"] == null)
-          .metadata.annotations["argocd.argoproj.io/sync-options"] = "ServerSideApply=true" |
-        select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-options"] != null and
-          (.metadata.annotations["argocd.argoproj.io/sync-options"] |
-          contains("ServerSideApply=") | not))
-          .metadata.annotations["argocd.argoproj.io/sync-options"] |= . + ",ServerSideApply=true" |
-        select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
-          .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
-      ' {} \;
+      # Only files holding a CRD go through yq, so the other goldens are Helm's
+      # output byte for byte, whatever yq version regenerates them.
+      while IFS= read -r -d '' manifest; do
+        grep -qE '^kind:[[:space:]]*["'\'']?CustomResourceDefinition["'\'']?[[:space:]]*$' "$manifest" || continue
+        yq -i '
+          select(.kind == "CustomResourceDefinition" and
+            .metadata.annotations["argocd.argoproj.io/sync-options"] == null)
+            .metadata.annotations["argocd.argoproj.io/sync-options"] = "ServerSideApply=true" |
+          select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-options"] != null and
+            (.metadata.annotations["argocd.argoproj.io/sync-options"] |
+            contains("ServerSideApply=") | not))
+            .metadata.annotations["argocd.argoproj.io/sync-options"] |= . + ",ServerSideApply=true" |
+          select(.kind == "CustomResourceDefinition" and .metadata.annotations["argocd.argoproj.io/sync-wave"] == null)
+            .metadata.annotations["argocd.argoproj.io/sync-wave"] = "-1"
+        ' "$manifest"
+      done < <(find "$output_dir" -type f \( -name "*.yaml" -o -name "*.yml" \) -print0)
 
       # The golden directory holds what the workflow publishes as the artifact
       # `hydrated-<chart>-<environment>`.
