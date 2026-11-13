@@ -214,7 +214,8 @@ whose manifests changed:
 6. Uploads the manifests as an artifact, if `upload-artifact` is `true`.
 7. For each selected pair, a `create-pull-request` job replaces only that chart's output on the environment branch
    and opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into
-   `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`.
+   `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`. Its title and body say why it
+   exists, see [Pull Request Titles](#pull-request-titles).
 
 A push that changes no manifests therefore starts no pull-request job, and in a repository holding several charts a
 change to one chart only opens pull requests for that chart. Every chart and environment is still rendered on every
@@ -223,6 +224,32 @@ run, because a change outside a chart's directory, or an upstream release for a 
 
 With `create-pull-request: false`, steps 4, 5 and 7 are skipped: no branch is created and no pull request is
 opened, which makes the workflow usable as a validation step on pull requests.
+
+### Pull Request Titles
+
+Every hydration commit carries two trailers, `Hydrated-From: <commit>` (the commit it was rendered from) and
+`Chart-Version: <version>` (the exact version, patch included). The next run reads them from the newest commit that
+changed the chart's directory on the environment branch, and compares that with what it rendered:
+
+| Cause | When | Title |
+|---|---|---|
+| Version | The chart version differs from the deployed one | `💧 [dev] loki 21.2.1 → 21.2.2` |
+| Change | Same version, and commits changed the chart's directory or a `file://` dependency inside the repository | `💧 [dev] falco: <title of the newest pull request> (#1355) (+1 more)` |
+| Re-render | Same version, and no commit changed the chart | `💧 [dev] falco: re-rendered without a chart change` |
+| Unknown | The environment branch records no render of the chart yet | `💧 [dev] Hydrated manifests for falco 9.2.2` |
+
+The body links the rendered and the deployed commit and lists every pull request, or directly pushed commit, that
+changed the chart since the deployed render. A re-render is caused by the rendering itself, a new Helm or `yq`
+version or a change to this workflow, and is labelled `rerender` as well, so such pull requests can be found and
+merged together. The label is removed again when the pull request picks up a chart change.
+
+The description is updated whenever the pull request's manifests are, and covers everything between the deployed
+render and the latest one. A pull request that was opened by an earlier version of the workflow keeps its title
+until then. Right after an upgrade the environment branches carry no trailers yet, so every chart's first pull
+request is titled as unknown.
+
+The pull-request jobs are named after the matrix values, starting with the environment and the chart, e.g.
+`create-pull-request (dev, loki, …)`. Workflows that read the environment and chart from the job name keep working.
 
 ### Environment Label Colours
 
