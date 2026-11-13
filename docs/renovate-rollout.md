@@ -32,8 +32,22 @@ Keep the repo's existing Renovate policy. Append these metadata-only rules to it
 ```
 
 Only trusted Renovate-authored PRs changing one chart's `Chart.yaml`/`Chart.lock`
-qualify. Missing eligible labels, `update:major`, and mixed changes stay manual.
-Rollout eligibility is independent of Renovate's source-PR automerge policy.
+qualify, and with `values-updates: true` also its `values*.yaml` files, where
+Renovate updates the images a chart pins. Missing eligible labels, `update:major`,
+a label from `manual-update-labels` and mixed changes stay manual. Rollout
+eligibility is independent of Renovate's source-PR automerge policy.
+
+Updates a soak cannot judge can be kept with a person by labelling them and listing
+the label in `manual-update-labels`, for example image minors of a `0.x` version:
+
+```json
+{
+  "matchDatasources": ["docker"],
+  "matchCurrentVersion": "/^v?0\\./",
+  "matchUpdateTypes": ["minor"],
+  "addLabels": ["update:manual"]
+}
+```
 
 ## Caller Workflow
 

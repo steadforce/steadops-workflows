@@ -771,6 +771,7 @@ hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
 open_pull 951 "$pull" dev
 VALUES_UPDATES=false run_labeller "$c1"
 expect_unlabelled 951
+grep -qF "#95 is left to a person: it changes more than one chart, or files other than its Chart.yaml and Chart.lock" "$fixture/log"
 VALUES_UPDATES=true run_labeller "$c1"
 expect_labelled 951
 expect_comment 951 "Source: \`$c1\` (#95, Renovate update of \`demo\`)."

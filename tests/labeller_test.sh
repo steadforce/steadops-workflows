@@ -78,8 +78,9 @@ echo 'Eligibility checks the author, the update labels and the changed files'
     pull_files() { printf '%s\n' infrastructure/demo/Chart.yaml infrastructure/demo/Chart.lock; }
     MANUAL_UPDATE_LABELS='["update:manual"]'
     [[ "$(renovate_chart_dir "$candidate" HEAD)" == infrastructure/demo ]]
-    [[ "$(renovate_chart_dir "$(jq '.labels += [{name:"update:manual"}]' <<< "$candidate")" HEAD 2>&1 >/dev/null)" == *'or it carries one of update:manual, update:major'* ]]
-    if renovate_chart_dir "$(jq '.labels += [{name:"update:major"}]' <<< "$candidate")" HEAD 2> /dev/null; then exit 1; fi
+    [[ "$(renovate_chart_dir "$(jq '.labels += [{name:"update:manual"}]' <<< "$candidate")" HEAD 2>&1 >/dev/null)" == *'it carries `update:manual`, which keeps it with a person'* ]]
+    [[ "$(renovate_chart_dir "$(jq '.labels += [{name:"update:major"}]' <<< "$candidate")" HEAD 2>&1 >/dev/null)" == *'it carries `update:major`'* ]]
+    [[ "$(renovate_chart_dir "$(jq '.labels = [{name:"update:digest"}]' <<< "$candidate")" HEAD 2>&1 >/dev/null)" == *'its update type is not one of update:patch, update:minor'* ]]
 )
 echo 'Eligibility takes values files only with values-updates, and manual labels outweigh eligible ones'
 

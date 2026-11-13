@@ -417,15 +417,18 @@ hydrated() {
 
 # The chart directory an eligible Renovate pull request merged as a commit updates, or the reason on stderr.
 renovate_chart_dir() {
-    local pull="$1" commit="$2" files integrated directory charts
+    local pull="$1" commit="$2" files integrated directory charts manual
     if [[ "$(jq -r .user.login <<< "$pull")" != "$RENOVATE_AUTHOR" ]]; then
         echo "it was opened by $(jq -r .user.login <<< "$pull"), not $RENOVATE_AUTHOR" >&2
         return 1
     fi
-    if ! jq -e --argjson eligible "$ELIGIBLE_UPDATE_LABELS" --argjson manual "$MANUAL_UPDATE_LABELS" '
-        any(.labels[]; .name as $label | $eligible | index($label) != null)
-        and all(.labels[]; .name as $label | $manual + ["update:major"] | index($label) == null)' <<< "$pull" > /dev/null; then
-        echo "its update type is not one of $(jq -r 'join(", ")' <<< "$ELIGIBLE_UPDATE_LABELS"), or it carries one of $(jq -r '. + ["update:major"] | join(", ")' <<< "$MANUAL_UPDATE_LABELS")" >&2
+    manual="$(jq -r --argjson manual "$MANUAL_UPDATE_LABELS" '[.labels[].name as $label | $manual + ["update:major"] | select(index($label) != null) | $label] | first // empty' <<< "$pull")" || return 1
+    if [[ -n "$manual" ]]; then
+        echo "it carries \`$manual\`, which keeps it with a person" >&2
+        return 1
+    fi
+    if ! jq -e --argjson eligible "$ELIGIBLE_UPDATE_LABELS" 'any(.labels[]; .name as $label | $eligible | index($label) != null)' <<< "$pull" > /dev/null; then
+        echo "its update type is not one of $(jq -r 'join(", ")' <<< "$ELIGIBLE_UPDATE_LABELS")" >&2
         return 1
     fi
     files="$(pull_files "$(jq -r .number <<< "$pull")")" || return 1
