@@ -7,3 +7,4 @@ metadata:
   namespace: service-a
 data:
   host: "service-a.example.com"
+
