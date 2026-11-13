@@ -491,6 +491,8 @@ requests with that label; the labeller itself never merges and never accesses a 
 | `helm-version` | As passed to the hydration workflow | `latest` | No |
 | `yq-version` | yq to install; empty uses the runner's, as the hydration workflow does | `""` | No |
 | `eligible-update-labels` | JSON array of Renovate update-type labels eligible for unattended rollout | `["update:patch","update:minor"]` | No |
+| `manual-update-labels` | JSON array of labels that keep a PR with a person although it carries an eligible one; `update:major` always does | `[]` | No |
+| `values-updates` | Also accept updates that change the chart's `values*.yaml` files, e.g. Renovate image updates | `false` | No |
 | `layout` | `single-chart` or `multi-chart`; derived from the discovery, only checked when set | `""` | No |
 | `sha` | Source commit; empty checks the latest commit of `source-branch` | `""` | No |
 | `source-branch` | Branch the charts and the Renovate pull requests live on | `main` | No |
@@ -499,7 +501,8 @@ requests with that label; the labeller itself never merges and never accesses a 
 ### How the Labeller Works
 
 1. Walks back over the last 20 commits of the source branch for merged Renovate pull requests that change only
-   one discovered chart's `Chart.yaml` and `Chart.lock` and carry an eligible update label.
+   one discovered chart's `Chart.yaml` and `Chart.lock`, with `values-updates` also its `values*.yaml` files, and
+   carry an eligible update label and none of `manual-update-labels`.
 2. For the newest such update of each chart, finds the open hydration pull requests of the chart by their branch,
    `hydration-pull-request/<environment>[-<chart>]-<version>`. An older version's pull request is superseded and
    loses the label; a newer one is left alone.

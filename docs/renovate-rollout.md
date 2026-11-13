@@ -99,6 +99,8 @@ other charts consume via `file://` is not.
 | `bundle-patches-in-one-pr` / `helm-version` | `true` / `latest`, as passed to the hydration workflow |
 | `yq-version` | Empty uses the runner's yq, as the hydration workflow does |
 | `eligible-update-labels` | JSON array, default `["update:patch","update:minor"]` |
+| `manual-update-labels` | JSON array, default `[]`; labels that keep a PR manual besides `update:major` |
+| `values-updates` | `false`; `true` also accepts changes to the chart's `values*.yaml`, where Renovate updates pinned images |
 | `layout` | Optional `single-chart` or `multi-chart`; derived, and only checked when set |
 | `source-branch` / `renovate-author` | `main` / `renovate[bot]` |
 
@@ -115,9 +117,12 @@ hydration goldens byte for byte.
 ## What Is Verified
 
 - The source is a merged pull request by `renovate-author` with an eligible update
-  label and no `update:major`. Both its complete PR file list and its integrated
-  commit delta must change only one discovered chart's `Chart.yaml` and `Chart.lock`;
-  potentially truncated API file lists are rejected.
+  label, no `update:major` and none of `manual-update-labels`. Both its complete PR
+  file list and its integrated commit delta must change only one discovered chart's
+  `Chart.yaml` and `Chart.lock`, and with `values-updates` its `values*.yaml` files;
+  potentially truncated API file lists are rejected. A values file can change
+  anything the chart renders, but the render comparison below still requires the
+  pull request to be exactly the update.
 - Complete Git diffs and the actual three-way merge change nothing outside the
   chart's manifest directory. The merge result equals the source render; conflicts
   are refused.
