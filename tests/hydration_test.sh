@@ -744,3 +744,42 @@ c4="$(renovate_update 44 infrastructure/demo 1.0.4)"
 run_labeller "$c4"
 expect_unlabelled 401
 echo 'ordering: the fallback to the recorded update still refuses a pull request that carries neither'
+
+# An image update Renovate makes in a values file is labelled only with values-updates, and never with a manual label.
+new_repository values
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+ELIGIBLE_UPDATE_LABELS='["update:patch","update:minor","update:digest"]'
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+renovate_values_update() {
+    local number="$1" setting="$2" labels="$3" sha
+    printf 'setting: %s\n' "$setting" > infrastructure/demo/values.yaml
+    sha="$(commit "Update the demo image to $setting")"
+    jq --argjson n "$number" --arg sha "$sha" --arg author "$RENOVATE_AUTHOR" --argjson labels "$labels" \
+        '. + [{number: $n, state: "closed", user: {login: $author}, labels: ([{name: "renovate"}] + ($labels | map({name: .}))),
+               merged_at: "2026-11-05T00:00:00Z", merge_commit_sha: $sha, base: {ref: "main"}, head: {ref: "renovate/\($n)"}}]' \
+        "$state/pulls.json" > "$state/pulls.tmp"
+    mv "$state/pulls.tmp" "$state/pulls.json"
+    printf '%s\n' "$sha"
+}
+c1="$(renovate_values_update 95 digest '["update:digest"]')"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 951 "$pull" dev
+VALUES_UPDATES=false run_labeller "$c1"
+expect_unlabelled 951
+grep -qF "#95 is left to a person: it changes more than one chart, or files other than its Chart.yaml and Chart.lock" "$fixture/log"
+VALUES_UPDATES=true run_labeller "$c1"
+expect_labelled 951
+expect_comment 951 "Source: \`$c1\` (#95, Renovate update of \`demo\`)."
+echo 'values: an image update in a values file is labelled with values-updates, not without'
+
+c2="$(renovate_values_update 96 minor '["update:minor","update:manual"]')"
+hydrate "$pull" environments/dev "$c2" dev infrastructure/demo
+open_pull 951 "$pull" dev
+VALUES_UPDATES=true MANUAL_UPDATE_LABELS='["update:manual"]' run_labeller "$c2"
+expect_unlabelled 951
+echo 'values: a manual label keeps an eligible update with a person'
