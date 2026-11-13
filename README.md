@@ -241,12 +241,14 @@ changed the chart's directory on the environment branch, and compares that with 
 The body links the rendered and the deployed commit and lists every pull request, or directly pushed commit, that
 changed the chart since the deployed render. A re-render is caused by the rendering itself, a new Helm or `yq`
 version or a change to this workflow, and is labelled `rerender` as well, so such pull requests can be found and
-merged together. The label is removed again when the pull request picks up a chart change.
+merged together. The label is removed again as soon as the pull request is anything else, a chart change or a
+version update, or unknown because nothing shows it is still a re-render.
 
 The description is updated whenever the pull request's manifests are, and covers everything between the deployed
 render and the latest one. A pull request that was opened by an earlier version of the workflow keeps its title
 until then. Right after an upgrade the environment branches carry no trailers yet, so every chart's first pull
-request is titled as unknown.
+request is titled as unknown. The description never holds back a pull request: when it cannot be worked out, the
+pull request is opened with the generic title and without trailers.
 
 The pull-request jobs are named after the matrix values, starting with the environment and the chart, e.g.
 `create-pull-request (dev, loki, …)`. Workflows that read the environment and chart from the job name keep working.

@@ -820,9 +820,11 @@ jobs:
       #                yet, e.g. on the first run of this version of the workflow.
       # Its outputs are the title, body and commit message of the pull request.
       # The description is informative only, so a failed lookup falls back to
-      # `unknown` rather than holding back the pull request.
+      # `unknown`, and a failure of the step itself leaves the pull request to
+      # the fallbacks in `Create pull request` rather than holding it back.
       id: describe
       if: ${{ !env.ACT }}
+      continue-on-error: true
       env:
         GH_TOKEN: ${{ github.token }}
         CHART: ${{ matrix.entry.name }}
@@ -1032,12 +1034,15 @@ jobs:
           automated pr
           env: ${{ matrix.entry.env }}
           ${{ steps.describe.outputs.cause == 'rerender' && 'rerender' || '' }}
-        title: ${{ steps.describe.outputs.title }}
-        body: ${{ steps.describe.outputs.body }}
-        commit-message: ${{ steps.describe.outputs.commit-message }}
+        # The fallbacks apply when `Describe the change` failed. The commit then
+        # carries no trailers, so the next run titles the chart as unknown.
+        title: ${{ steps.describe.outputs.title || format('💧 [{0}] Hydrated manifests for {1} {2}', matrix.entry.env, matrix.entry.name, matrix.entry.full-version) }}
+        body: ${{ steps.describe.outputs.body || 'Automated changes by the Helm hydration workflow.' }}
+        commit-message: ${{ steps.describe.outputs.commit-message || format('Hydrate {0} {1} for {2}', matrix.entry.name, matrix.entry.full-version, matrix.entry.env) }}
     - name: Remove the rerender label
       # create-pull-request only adds labels, so a pull request that was a pure
-      # re-render and now holds a chart change would keep the label.
+      # re-render would keep the label once it is anything else, including
+      # unknown, where nothing shows it is still a re-render.
       if: ${{ !env.ACT && steps.describe.outputs.cause != 'rerender' && steps.create.outputs.pull-request-number != '' }}
       env:
         GH_TOKEN: ${{ github.token }}
