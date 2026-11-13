@@ -32,7 +32,7 @@ jobs:
     - uses: azure/setup-helm@v5.0.1
       with:
         version: v3.19.0
-    - uses: actions/setup-node@v6
+    - uses: actions/setup-node@v7
       with:
         node-version: '24'
     - name: Validate hydration eligibility and rendered comparisons
