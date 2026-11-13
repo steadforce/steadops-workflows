@@ -119,7 +119,7 @@ jobs:
         path: .steadops
         persist-credentials: false
         token: ${{ secrets.workflows-read-token || github.token }}
-    - uses: azure/setup-helm@v5.0.1
+    - uses: azure/setup-helm@v5.1.0
       with:
         version: ${{ inputs.helm-version }}
     - name: Resolve source commit

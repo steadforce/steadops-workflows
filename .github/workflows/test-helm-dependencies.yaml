@@ -39,7 +39,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v7
     - name: Set up Helm
-      uses: azure/setup-helm@v5.0.1
+      uses: azure/setup-helm@v5.1.0
       with:
         version: v4.3.2
     - name: Install dependencies pinned by Chart.lock
