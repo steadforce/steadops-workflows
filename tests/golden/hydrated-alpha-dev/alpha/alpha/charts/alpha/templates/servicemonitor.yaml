@@ -7,8 +7,8 @@ metadata:
   namespace: alpha
 spec:
   endpoints:
-    - interval: 15s
-      port: metrics
+  - interval: 15s
+    port: metrics
   selector:
     matchLabels:
       app: alpha-alpha

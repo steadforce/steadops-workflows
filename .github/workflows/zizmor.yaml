@@ -1,0 +1,95 @@
+# zizmor GitHub Actions Security Audit
+#
+# Audits the workflows and composite actions of the calling repository with
+# zizmor for security issues: template injection in `run:` blocks, credentials
+# persisted by actions/checkout, overly broad permissions, dangerous triggers,
+# unpinned action references and more.
+#
+# Purpose
+# -------
+# A workflow runs with the repository's token and secrets, so a mistake in one
+# is a security issue rather than a broken build. actionlint checks that a
+# workflow is valid; zizmor checks that it is safe. Each finding names the
+# audit, the file and line and links to the audit's documentation.
+#
+# Inputs
+# ------
+#   min-severity   – Lowest severity that is reported and fails the job:
+#                    informational, low, medium or high. Empty reports all.
+#   persona        – regular, pedantic or auditor. Pedantic and auditor add
+#                    findings that are style or need a person to judge.
+#   online-audits  – Run the audits that query GitHub, such as
+#                    impostor-commit and known-vulnerable-actions. Off by
+#                    default: they fail the whole run when a `uses:` names a
+#                    repository the token cannot read, which every reference to
+#                    an internal repository such as this one does with the
+#                    GITHUB_TOKEN.
+#
+# Secrets
+# -------
+#   token          – Token for the online audits. Defaults to the GITHUB_TOKEN;
+#                    pass one that can read every repository the workflows
+#                    reference to run online audits on internal references.
+#
+# Expected repository layout
+# --------------------------
+#   .github/zizmor.yml  – (optional) zizmor configuration, read automatically.
+#                         Holds audit settings such as the unpinned-uses
+#                         policy; single findings are better suppressed inline
+#                         with a `# zizmor: ignore[<audit>]` comment.
+name: zizmor GitHub Actions audit
+
+on:
+  workflow_call:
+    inputs:
+      min-severity:
+        description: "Lowest severity reported: informational, low, medium or high. Empty reports all."
+        required: false
+        type: string
+        default: ""
+      persona:
+        description: "Auditing persona: regular, pedantic or auditor."
+        required: false
+        type: string
+        default: "regular"
+      online-audits:
+        description: "Run the audits that query GitHub."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      token:
+        description: "Token for the online audits. Defaults to the GITHUB_TOKEN."
+        required: false
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Read-only access to repository contents is sufficient for the audit.
+      contents: read
+    steps:
+    - name: Checkout repository
+      # zizmor only reads the files, so the token is not left in .git/config.
+      uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - name: Audit with zizmor
+      # Runs the zizmor image directly, like the Gitleaks scan, so Renovate
+      # updates the version through the image tag.
+      # --min-severity      Only set when the input is not empty.
+      # --no-online-audits  Unless online-audits is set; the offline audits
+      #                     still run.
+      # --color=always      The job log renders ANSI colours.
+      # The exit code is non-zero on any reported finding, failing the job.
+      uses: docker://ghcr.io/zizmorcore/zizmor:1.32.0
+      env:
+        GH_TOKEN: ${{ secrets.token || github.token }}
+      with:
+        args: >-
+          --persona ${{ inputs.persona }}
+          ${{ inputs.min-severity != '' && format('--min-severity {0}', inputs.min-severity) || '' }}
+          ${{ !inputs.online-audits && '--no-online-audits' || '' }}
+          --color=always
+          .

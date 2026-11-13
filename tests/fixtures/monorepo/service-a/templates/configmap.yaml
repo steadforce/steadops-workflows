@@ -5,3 +5,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   owner: platform
+  # Formatting yq would rewrite, which the hydration has to keep as Helm renders it.
+  aligned:    value
+  expression: >-
+    sum by (job) (
+      rate(errors_total[5m])
+    ) > 0

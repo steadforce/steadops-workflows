@@ -14,6 +14,7 @@ Workflows live in `.github/workflows/`, the actions in `.github/actions/`.
 | [Gitleaks](#gitleaks-secret-scan-workflow) | `gitleaks.yaml` | Scan the full git history for secrets |
 | [Trufflehog](#trufflehog-secret-scan-workflow) | `trufflehog-oss.yaml` | Scan pushed or PR commits for secrets |
 | [Renovate hydration labeller](#renovate-hydration-labeller-workflow) | `label-renovate-hydration.yaml` | Label hydration PRs that carry only a Renovate update |
+| [zizmor](#zizmor-github-actions-audit-workflow) | `zizmor.yaml` | Audit workflows and actions for security issues |
 | [Helm dependencies](#helm-dependencies-action) | `helm-dependencies/action.yml` | Install chart dependencies |
 | [Teams notification](#ms-teams-notification-action) | `teams-notification/action.yml` | Post a job result to Teams |
 
@@ -202,6 +203,8 @@ whose manifests changed:
       `--skip-tests`.
    2. Adds the Argo CD annotations `sync-options: ServerSideApply=true` and `sync-wave: "-1"` to every
       CustomResourceDefinition. An existing `sync-options` value is extended, an existing `sync-wave` is kept.
+      Only files that hold a CRD are rewritten by `yq`; every other manifest is committed exactly as Helm renders
+      it, so a new `yq` release on the runner does not reformat it.
 
    A chart or environment that fails is reported and skipped. The others are still hydrated, and the job fails at
    the end.
@@ -212,7 +215,8 @@ whose manifests changed:
 6. Uploads the manifests as an artifact, if `upload-artifact` is `true`.
 7. For each selected pair, a `create-pull-request` job replaces only that chart's output on the environment branch
    and opens or updates a pull request from `hydration-pull-request/<env>[-<chart>]-<version>` into
-   `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`.
+   `environments/<env>`, labelled `hydration`, `automated pr` and `env: <env>`. Its title and body say why it
+   exists, see [Pull Request Titles](#pull-request-titles).
 
 A push that changes no manifests therefore starts no pull-request job, and in a repository holding several charts a
 change to one chart only opens pull requests for that chart. Every chart and environment is still rendered on every
@@ -221,6 +225,34 @@ run, because a change outside a chart's directory, or an upstream release for a 
 
 With `create-pull-request: false`, steps 4, 5 and 7 are skipped: no branch is created and no pull request is
 opened, which makes the workflow usable as a validation step on pull requests.
+
+### Pull Request Titles
+
+Every hydration commit carries two trailers, `Hydrated-From: <commit>` (the commit it was rendered from) and
+`Chart-Version: <version>` (the exact version, patch included). The next run reads them from the newest commit that
+changed the chart's directory on the environment branch, and compares that with what it rendered:
+
+| Cause | When | Title |
+|---|---|---|
+| Version | The chart version differs from the deployed one | `💧 [dev] loki 21.2.1 → 21.2.2` |
+| Change | Same version, and commits changed the chart's directory or a `file://` dependency inside the repository | `💧 [dev] falco: <title of the newest pull request> (#1355) (+1 more)` |
+| Re-render | Same version, and no commit changed the chart | `💧 [dev] falco: re-rendered without a chart change` |
+| Unknown | The environment branch records no render of the chart yet | `💧 [dev] Hydrated manifests for falco 9.2.2` |
+
+The body links the rendered and the deployed commit and lists every pull request, or directly pushed commit, that
+changed the chart since the deployed render. A re-render is caused by the rendering itself, a new Helm or `yq`
+version or a change to this workflow, and is labelled `rerender` as well, so such pull requests can be found and
+merged together. The label is removed again as soon as the pull request is anything else, a chart change or a
+version update, or unknown because nothing shows it is still a re-render.
+
+The description is updated whenever the pull request's manifests are, and covers everything between the deployed
+render and the latest one. A pull request that was opened by an earlier version of the workflow keeps its title
+until then. Right after an upgrade the environment branches carry no trailers yet, so every chart's first pull
+request is titled as unknown. The description never holds back a pull request: when it cannot be worked out, the
+pull request is opened with the generic title and without trailers.
+
+The pull-request jobs are named after the matrix values, starting with the environment and the chart, e.g.
+`create-pull-request (dev, loki, …)`. Workflows that read the environment and chart from the job name keep working.
 
 ### Environment Label Colours
 
@@ -480,6 +512,94 @@ requests with that label; the labeller itself never merges and never accesses a 
    does not, says why and hands it back from the gatekeepers. A render that fails three times, or no deployed state
    within 100 commits, leaves the pull request as it is until the next run.
 5. Checks every other labelled pull request again against its recorded source, which records a moved base.
+
+## zizmor GitHub Actions Audit Workflow
+
+Audits the workflows and composite actions of the calling repository with [zizmor](https://docs.zizmor.sh) for
+security issues: template injection in `run:` blocks, credentials persisted by `actions/checkout`, overly broad
+permissions, dangerous triggers, unpinned action references and more. actionlint checks that a workflow is valid,
+zizmor that it is safe.
+
+### zizmor Inputs
+
+| Input | Description | Default | Required |
+|---|---|---|---|
+| `min-severity` | Lowest severity reported: `informational`, `low`, `medium` or `high`. Empty reports all | `""` | No |
+| `persona` | Auditing persona: `regular`, `pedantic` or `auditor` | `regular` | No |
+| `online-audits` | Run the audits that query GitHub, see [Online Audits](#online-audits) | `false` | No |
+
+### zizmor Secrets
+
+| Secret | Description | Required |
+|---|---|---|
+| `token` | Token for the online audits. Defaults to the `GITHUB_TOKEN` | No |
+
+### zizmor Usage
+
+```yaml
+name: GitHub Actions audit
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+jobs:
+  zizmor:
+    uses: steadforce/steadops-workflows/.github/workflows/zizmor.yaml@main
+```
+
+### Online Audits
+
+Some audits, such as `impostor-commit` and `known-vulnerable-actions`, query GitHub for every repository a `uses:`
+names. When the token cannot read one of them, zizmor fails the whole run instead of skipping the reference. The
+`GITHUB_TOKEN` only reads the repository it belongs to, so every reference to an internal repository, such as the
+workflows of this one, fails the run. The online audits are therefore off by default; set `online-audits: true`
+together with a `token` that can read every referenced repository, for example a GitHub App token, to run them.
+
+### Configuring zizmor
+
+zizmor reads `.github/zizmor.yml` from the calling repository. By default the `unpinned-uses` audit requires every
+action and reusable workflow to be pinned to a commit hash. A repository that pins the workflows of this one to a
+release tag allows that explicitly:
+
+```yaml
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        steadforce/*: ref-pin
+        "*": hash-pin
+```
+
+A single finding is suppressed where it occurs, with a comment stating why:
+
+```yaml
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] triggered by a push to main only
+```
+
+Reproduce the audit locally with the same image; add `-e GH_TOKEN="$(gh auth token)"` and drop
+`--no-online-audits` for the online audits:
+
+```sh
+ docker run \
+   --rm \
+   -u $(id -u) \
+   -e HOME=/tmp \
+   -v "$(pwd):/repo:ro" \
+   -w /repo \
+   ghcr.io/zizmorcore/zizmor:1.32.0 --no-online-audits .
+```
+
+Some findings can be fixed with `--fix=safe`; mount the repository writable and review the diff.
+
+### How zizmor Works
+
+Checks out the repository without persisting the token and runs zizmor 1.32.0 over it. The job log lists every
+finding with its audit, file, line and a link to the audit's documentation, and the job fails on any finding at or
+above `min-severity`.
 
 ---
 

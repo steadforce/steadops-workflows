@@ -32,6 +32,9 @@ that proposes it.
   `sync-options`, which are the two paths through the annotation post-processing.
 - Templates owned by the umbrella chart next to the templates of the upstream
   chart.
+- Formatting `yq` would rewrite (`monorepo/service-a`: extra spaces after a key,
+  a folded scalar with a more-indented line), which has to reach the golden as
+  Helm renders it because only CRD files go through `yq`.
 - A chart that does not commit `Chart.lock` and pins its dependency with a
   version range (`monorepo/service-c`), which is the layout of a repository that
   git-ignores the lock file. Its lock is git-ignored so the fixture keeps that

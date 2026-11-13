@@ -16,5 +16,5 @@ spec:
         app: alpha-alpha
     spec:
       containers:
-        - name: alpha
-          image: registry.example.com/alpha:1.4.2
+      - name: alpha
+        image: registry.example.com/alpha:1.4.2
