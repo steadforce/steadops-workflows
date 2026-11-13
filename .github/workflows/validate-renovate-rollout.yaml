@@ -31,7 +31,7 @@ jobs:
     # The goldens are rendered with Helm 3.19.0 and the runner's yq, like test-helm-hydration.yaml.
     - uses: azure/setup-helm@v5.1.0
       with:
-        version: v3.19.0
+        version: v3.22.1
     - uses: actions/setup-node@v7
       with:
         node-version: '24'
