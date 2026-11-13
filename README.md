@@ -13,6 +13,7 @@ Workflows live in `.github/workflows/`, the actions in `.github/actions/`.
 | [Helm unittest](#helm-unittest-workflow) | `helm-unittest.yaml` | helm-unittest and `helm lint`, Teams on Renovate |
 | [Gitleaks](#gitleaks-secret-scan-workflow) | `gitleaks.yaml` | Scan the full git history for secrets |
 | [Trufflehog](#trufflehog-secret-scan-workflow) | `trufflehog-oss.yaml` | Scan pushed or PR commits for secrets |
+| [Renovate hydration labeller](#renovate-hydration-labeller-workflow) | `label-renovate-hydration.yaml` | Label hydration PRs that carry only a Renovate update |
 | [zizmor](#zizmor-github-actions-audit-workflow) | `zizmor.yaml` | Audit workflows and actions for security issues |
 | [Helm dependencies](#helm-dependencies-action) | `helm-dependencies/action.yml` | Install chart dependencies |
 | [Teams notification](#ms-teams-notification-action) | `teams-notification/action.yml` | Post a job result to Teams |
@@ -472,6 +473,46 @@ jobs:
 
 ---
 
+## Renovate Hydration Labeller Workflow
+
+Labels the hydration pull requests that carry exactly one eligible Renovate chart update, or an unbroken run of
+them, with `renovate-hydration`. The cluster gatekeepers of
+[renovate-gatekeeper-deployment](https://github.com/steadforce/renovate-gatekeeper-deployment) merge only pull
+requests with that label; the labeller itself never merges and never accesses a cluster.
+[docs/renovate-rollout.md](docs/renovate-rollout.md) has the caller workflow, the Renovate rules and the rollout.
+
+### Labeller Inputs
+
+| Input | Description | Default | Required |
+|---|---|---|---|
+| `charts-root` | As passed to the hydration workflow | `.` | No |
+| `chart-discovery-depth` | As passed to the hydration workflow | `1` | No |
+| `bundle-patches-in-one-pr` | As passed to the hydration workflow | `true` | No |
+| `helm-version` | As passed to the hydration workflow | `latest` | No |
+| `yq-version` | yq to install; empty uses the runner's, as the hydration workflow does | `""` | No |
+| `eligible-update-labels` | JSON array of Renovate update-type labels eligible for unattended rollout | `["update:patch","update:minor"]` | No |
+| `layout` | `single-chart` or `multi-chart`; derived from the discovery, only checked when set | `""` | No |
+| `sha` | Source commit; empty checks the latest commit of `source-branch` | `""` | No |
+| `source-branch` | Branch the charts and the Renovate pull requests live on | `main` | No |
+| `renovate-author` | Login of the Renovate bot | `renovate[bot]` | No |
+
+### How the Labeller Works
+
+1. Walks back over the last 20 commits of the source branch for merged Renovate pull requests that change only
+   one discovered chart's `Chart.yaml` and `Chart.lock` and carry an eligible update label.
+2. For the newest such update of each chart, finds the open hydration pull requests of the chart by their branch,
+   `hydration-pull-request/<environment>[-<chart>]-<version>`. An older version's pull request is superseded and
+   loses the label; a newer one is left alone.
+3. Renders the chart with the hydration workflow's own invocation and post-processing, at the update and before it,
+   and compares the renders with the pull request and its environment branch, ignoring only YAML formatting and
+   key order. Walking back up to 100 commits, Renovate updates of the same chart (at most 10) and commits that leave
+   its render for the environment unchanged extend the run; any other commit ends it. A commit that changes nothing
+   the render reads, the chart, its `file://` dependencies recursively and its value files, is not rendered at all.
+4. Labels a pull request that holds, with a comment recording the source commit, head and base; refuses one that
+   does not, says why and hands it back from the gatekeepers. A render that fails three times, or no deployed state
+   within 100 commits, leaves the pull request as it is until the next run.
+5. Checks every other labelled pull request again against its recorded source, which records a moved base.
+
 ## zizmor GitHub Actions Audit Workflow
 
 Audits the workflows and composite actions of the calling repository with [zizmor](https://docs.zizmor.sh) for
@@ -704,3 +745,13 @@ therefore reaches callers only after:
 
 Until the tag exists, the jobs that call the action fail to resolve it, for example the hydration tests on the pull
 request. Re-run them after tagging.
+
+`release.yaml` creates the tag: run it on `main` with the new version. It runs the labeller tests and the hydration
+golden tests first and refuses to overwrite an existing tag.
+
+### Testing the Renovate Hydration Labeller
+
+`validate-renovate-rollout.yaml` runs `tests/labeller_test.sh` and `tests/hydration_test.sh`. The first renders the
+fixtures with the labeller and compares them byte for byte with `tests/golden`, so the labeller cannot drift from
+the hydration workflow. The second runs the labeller end to end against a hydrated git repository and a fake GitHub
+API. Both need Helm 3.19.0, the version the goldens were rendered with.

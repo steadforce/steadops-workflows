@@ -1,0 +1,58 @@
+name: Release shared workflows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: New immutable release tag, for example v4.4.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-workflows-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Validate release request
+      env:
+        RELEASE_VERSION: ${{ inputs.version }}
+        RELEASE_BRANCH: ${{ github.ref }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        [[ "$RELEASE_BRANCH" == refs/heads/main ]] || { echo 'Releases must run from main' >&2; exit 1; }
+        [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a version such as v4.4.0' >&2; exit 1; }
+        existing="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_VERSION" \
+          --jq ".[] | select(.ref == \"refs/tags/$RELEASE_VERSION\") | .ref")"
+        [[ -z "$existing" ]] || { echo 'Release tags must not be overwritten' >&2; exit 1; }
+  validate-labeller:
+    needs: preflight
+    uses: ./.github/workflows/validate-renovate-rollout.yaml
+  validate-producer:
+    needs: preflight
+    # test-helm-hydration.yaml declares these; a caller can only narrow them.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/test-helm-hydration.yaml
+  publish:
+    needs: [validate-labeller, validate-producer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Publish tested revision
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_VERSION: ${{ inputs.version }}
+      run: |
+        gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
+          --target "$GITHUB_SHA" --title "$RELEASE_VERSION" --generate-notes

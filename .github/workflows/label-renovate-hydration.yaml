@@ -1,0 +1,163 @@
+# Renovate Hydration Labeller
+#
+# Labels the hydration pull requests that carry exactly one eligible Renovate
+# chart update, or an unbroken run of them, with `renovate-hydration`, so the
+# cluster gatekeepers of renovate-gatekeeper-deployment may merge them. It
+# never merges and never accesses a cluster.
+#
+# Purpose
+# -------
+# A hydration pull request is only safe to merge unattended when it carries the
+# update and nothing else. The labeller renders the chart the way
+# helm-hydration.yaml does, before and with the update, and compares both with
+# the environment branch and the pull request. A trusted comment records the
+# source commit and the head and base the check saw; a gatekeeper merges only
+# while those still match.
+#
+# Inputs
+# ------
+#   charts-root, chart-discovery-depth, bundle-patches-in-one-pr, helm-version
+#                  – Exactly as passed to helm-hydration.yaml. They decide the
+#                    charts, the manifest layout, the pull request branches and
+#                    the render, so a mismatch fails the run or the comparison.
+#   layout         – Optional. Derived from the discovery like
+#                    helm-hydration.yaml does; when set it only has to agree.
+#   eligible-update-labels
+#                  – Renovate update-type labels eligible for unattended rollout.
+#   sha            – Source commit; empty checks the latest source-branch commit.
+#
+# Triggers
+# --------
+# Call it after every successful hydration run and on a schedule. The
+# environment branches carry no workflows, so the schedule is what re-checks a
+# labelled pull request whose base moved after another chart was merged.
+name: Label Renovate hydration
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Source commit to inspect; defaults to the latest source-branch commit.
+        default: ''
+        type: string
+      source-branch:
+        default: main
+        type: string
+      charts-root:
+        description: Directory the chart search starts from, as passed to helm-hydration.yaml.
+        default: .
+        type: string
+      chart-discovery-depth:
+        description: Maximum search depth for helm-config.yaml below charts-root, as passed to helm-hydration.yaml.
+        default: 1
+        type: number
+      bundle-patches-in-one-pr:
+        description: As passed to helm-hydration.yaml; decides the pull request branch names.
+        default: true
+        type: boolean
+      layout:
+        description: Optional single-chart or multi-chart; derived from the discovery and only checked when set.
+        default: ''
+        type: string
+      renovate-author:
+        default: renovate[bot]
+        type: string
+      eligible-update-labels:
+        description: JSON array of update-type labels eligible for cluster rollout; independent of source automerge policy.
+        default: '["update:patch","update:minor"]'
+        type: string
+      helm-version:
+        description: Helm CLI version, as passed to helm-hydration.yaml.
+        default: latest
+        type: string
+      yq-version:
+        description: yq version to install; empty uses the runner's, as helm-hydration.yaml does.
+        default: ''
+        type: string
+    secrets:
+      workflows-read-token:
+        description: Optional read-only token for checking out a private steadops-workflows repository.
+        required: false
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      # Resolves this workflow's own revision from the run's metadata.
+      actions: read
+      contents: read
+      pull-requests: write
+      # Labels and pull request comments belong to the issues API.
+      issues: write
+    concurrency:
+      group: renovate-hydration-labeller-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ inputs.source-branch }}
+        fetch-depth: 0
+        path: source
+    - name: Resolve reusable workflow revision
+      id: workflow
+      env:
+        GH_TOKEN: ${{ github.token }}
+        WORKFLOW_PATH: steadforce/steadops-workflows/.github/workflows/label-renovate-hydration.yaml
+      run: |
+        metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")" || exit 1
+        sha="$(jq -er --arg path "$WORKFLOW_PATH@" '
+          [.referenced_workflows[]? | select(.path | startswith($path)) | .sha]
+          | unique | if length == 1 then .[0] else error("Expected one resolved labeller workflow revision") end
+        ' <<< "$metadata")" || exit 1
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@v7
+      with:
+        repository: steadforce/steadops-workflows
+        ref: ${{ steps.workflow.outputs.sha }}
+        path: .steadops
+        persist-credentials: false
+        token: ${{ secrets.workflows-read-token || github.token }}
+    - uses: azure/setup-helm@v5.0.1
+      with:
+        version: ${{ inputs.helm-version }}
+    - name: Resolve source commit
+      id: source
+      working-directory: source
+      env:
+        SOURCE_SHA: ${{ inputs.sha }}
+        SOURCE_BRANCH: ${{ inputs.source-branch }}
+      run: |
+        if [[ -n "$SOURCE_SHA" ]]; then
+          sha="$SOURCE_SHA"
+        else
+          sha="$(git rev-parse "origin/$SOURCE_BRANCH")"
+        fi
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+    - name: Install yq
+      if: inputs.yq-version != ''
+      env:
+        YQ_VERSION: ${{ inputs.yq-version }}
+      run: |
+        [[ "$YQ_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        mkdir -p "$RUNNER_TEMP/steadops-bin"
+        curl --fail --silent --show-error --location \
+          "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_amd64" \
+          --output "$RUNNER_TEMP/steadops-bin/yq"
+        chmod +x "$RUNNER_TEMP/steadops-bin/yq"
+        echo "$RUNNER_TEMP/steadops-bin" >> "$GITHUB_PATH"
+    - name: Verify and label hydration pull requests
+      working-directory: source
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        SOURCE_BRANCH: ${{ inputs.source-branch }}
+        CHARTS_ROOT: ${{ inputs.charts-root }}
+        DISCOVERY_DEPTH: ${{ inputs.chart-discovery-depth }}
+        BUNDLE_PATCHES: ${{ inputs.bundle-patches-in-one-pr }}
+        LAYOUT: ${{ inputs.layout }}
+        RENOVATE_AUTHOR: ${{ inputs.renovate-author }}
+        ELIGIBLE_UPDATE_LABELS: ${{ inputs.eligible-update-labels }}
+      run: bash ../.steadops/scripts/label-renovate-hydration.sh "$SOURCE_SHA"

@@ -1,0 +1,49 @@
+name: Validate Renovate hydration
+
+on:
+  pull_request:
+    paths:
+    - docs/renovate-rollout.md
+    - scripts/label-renovate-hydration.sh
+    - tests/**
+    - .github/workflows/*renovate*.yaml
+  push:
+    branches: [main]
+    paths:
+    - docs/renovate-rollout.md
+    - scripts/label-renovate-hydration.sh
+    - tests/**
+    - .github/workflows/*renovate*.yaml
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    # The goldens are rendered with Helm 3.19.0 and the runner's yq, like test-helm-hydration.yaml.
+    - uses: azure/setup-helm@v5.0.1
+      with:
+        version: v3.19.0
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
+    - name: Validate hydration eligibility and rendered comparisons
+      run: |
+        bash -n scripts/label-renovate-hydration.sh
+        shellcheck --severity=warning scripts/label-renovate-hydration.sh
+        bash tests/labeller_test.sh
+        bash tests/hydration_test.sh
+    - name: Validate native Renovate workflow updates
+      env:
+        RENOVATE_MODULE_ROOT: ${{ runner.temp }}/renovate-validation/node_modules/renovate
+      run: |
+        npm install --prefix "$RUNNER_TEMP/renovate-validation" --no-save --ignore-scripts --no-audit --no-fund renovate@44.220.0
+        node tests/renovate_workflow_test.mjs
