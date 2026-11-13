@@ -162,9 +162,10 @@ dependency_files() {
     done
     return 0
 }
-# The first absolute file:// dependency of a chart at a commit, followed through its dependencies inside the repository; nothing when there is none.
-absolute_dependency() {
-    local commit="$1" path dependency
+# The first render input of a chart at a commit that no commit records, as "<input><tab><what it is>"; nothing when there is none.
+# That is an absolute file:// dependency, or a file:// dependency or value file outside the repository; dependencies inside it are followed.
+unrecorded_input() {
+    local commit="$1" path dependency resolved value_file status
     local -a queue=("$2")
     local -A seen=()
     while [[ "${#queue[@]}" -gt 0 ]]; do
@@ -174,26 +175,38 @@ absolute_dependency() {
         seen[$path]=1
         while IFS= read -r dependency; do
             if [[ "$dependency" == /* ]]; then
-                printf 'file://%s\n' "$dependency"
+                printf 'file://%s\tan absolute path\n' "$dependency"
                 return 0
             fi
-            # Beyond the repository or a symlink it cannot be followed; render_inputs then leaves the commit without a key.
-            if dependency="$(resolve_path "$commit" "$path" "$dependency")"; then
-                queue+=("$dependency")
-            fi
+            status=0
+            resolved="$(resolve_path "$commit" "$path" "$dependency")" || status=$?
+            case "$status" in
+                0) queue+=("$resolved") ;;
+                3) printf 'file://%s\ta path outside the repository\n' "$dependency"
+                   return 0 ;;
+                # Behind a symlink it cannot be followed; render_inputs then leaves the commit without a key.
+            esac
         done < <(dependency_files "$commit" "$path" \
             | yq -N -r 'explode(.) | .dependencies[]? | .repository | select(test("^file://")) | sub("^file://"; "")')
     done
+    while IFS= read -r value_file; do
+        status=0
+        resolve_path "$commit" "$2" "$value_file" > /dev/null || status=$?
+        if [[ "$status" -eq 3 ]]; then
+            printf '%s\ta value file outside the repository\n' "$value_file"
+            return 0
+        fi
+    done < <(git show "$commit:$(in_chart "$2" helm-config.yaml)" 2> /dev/null | yq -N -r 'explode(.) | .environments[]?.valueFiles[]?')
 }
-# Whether a chart renders at a commit as it did then; a render would read today's content of an absolute path, so it sets HOLDS_REASON.
+# Whether a chart renders at a commit as it did then; a render would read today's content of an unrecorded input, so it sets HOLDS_REASON.
 renderable() {
-    local dependency
-    dependency="$(absolute_dependency "$1" "$2")"
-    [[ -n "$dependency" ]] || return 0
-    HOLDS_REASON="the chart depends on \`$dependency\` at ${1:0:7}, an absolute path no commit records, so it cannot be rendered as it was"
+    local input
+    input="$(unrecorded_input "$1" "$2")"
+    [[ -n "$input" ]] || return 0
+    HOLDS_REASON="the chart reads \`${input%%$'\t'*}\` at ${1:0:7}, ${input#*$'\t'}, which no commit records, so it cannot be rendered as it was"
     return 1
 }
-# A path relative to a directory, resolved one component at a time against a commit's tree as the filesystem would; fails outside the repository or through a symlink.
+# A path relative to a directory, resolved one component at a time against a commit's tree as the filesystem would; status 3 outside the repository, 1 through a symlink.
 resolve_path() {
     local commit="$1" part mode
     local -a stack=() parts=()
@@ -203,7 +216,7 @@ resolve_path() {
         case "$part" in
             ""|.) ;;
             ..)
-                [[ "${#stack[@]}" -gt 0 ]] || return 1
+                [[ "${#stack[@]}" -gt 0 ]] || return 3
                 unset 'stack[-1]' ;;
             *)
                 stack+=("$part")
@@ -612,6 +625,12 @@ label_update() {
         labelled=false
         ! jq -e --arg label "$LABEL" 'any(.labels[]; .name == $label)' <<< "$pull" > /dev/null || labelled=true
         if ! rendered "$commit" "$environment" "$chart_dir" > /dev/null || ! version="$(branch_version "$commit" "$chart_dir")"; then
+            # An input outside the repository is usually missing beside the labeller's checkout; that is the chart's fault, not a passing one.
+            if ! renderable "$commit" "$chart_dir"; then
+                handled[$pr]=1
+                refuse "$pr" "$labelled" "$HOLDS_REASON" || return 1
+                continue
+            fi
             echo "::warning::$chart could not be rendered at ${commit:0:7} for $environment, see the log; #$pr left as it is"
             continue
         fi

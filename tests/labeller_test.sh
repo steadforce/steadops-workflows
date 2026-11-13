@@ -149,17 +149,31 @@ printf 'apiVersion: v2\nname: demo\nversion: 1.0.0\ndependencies:\n- name: share
 printf 'environments:\n  dev: {}\n' > infrastructure/demo/helm-config.yaml
 printf 'apiVersion: v2\nname: shared\nversion: 1.0.0\n' > charts/shared/Chart.yaml
 git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m relative
-[[ -z "$(absolute_dependency HEAD infrastructure/demo)" ]]
+[[ -z "$(unrecorded_input HEAD infrastructure/demo)" ]]
 renderable HEAD infrastructure/demo
 [[ -n "$(input_key HEAD infrastructure/demo)" ]]
 printf 'dependencies:\n- name: outside\n  version: 1.0.0\n  repository: file:///opt/charts/outside\n' > charts/shared/requirements.yaml
 git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m absolute
-[[ "$(absolute_dependency HEAD infrastructure/demo)" == file:///opt/charts/outside ]]
+[[ "$(unrecorded_input HEAD infrastructure/demo)" == $'file:///opt/charts/outside\tan absolute path' ]]
 if renderable HEAD infrastructure/demo; then exit 1; fi
 [[ "$HOLDS_REASON" == *'`file:///opt/charts/outside`'* ]]
 [[ -z "$(input_key HEAD infrastructure/demo)" ]]
 renderable HEAD~1 infrastructure/demo
 echo 'An absolute file:// dependency, also two charts down, makes a commit unrenderable and leaves no render key'
+
+# Relative paths that lead out of the repository read today's content just the same, as a dependency or as a value file.
+printf 'dependencies:\n- name: outside\n  version: 1.0.0\n  repository: file://../../../outside\n' > charts/shared/requirements.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'relative outside'
+[[ "$(unrecorded_input HEAD infrastructure/demo)" == $'file://../../../outside\ta path outside the repository' ]]
+if renderable HEAD infrastructure/demo; then exit 1; fi
+[[ "$HOLDS_REASON" == *'`file://../../../outside` at '*', a path outside the repository, '* ]]
+git rm --quiet charts/shared/requirements.yaml
+printf 'environments:\n  dev:\n    valueFiles: [values.yaml, ../../../values.yaml]\n' > infrastructure/demo/helm-config.yaml
+git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'value file outside'
+[[ "$(unrecorded_input HEAD infrastructure/demo)" == $'../../../values.yaml\ta value file outside the repository' ]]
+if renderable HEAD infrastructure/demo; then exit 1; fi
+[[ -z "$(input_key HEAD infrastructure/demo)" ]]
+echo 'A file:// dependency or value file outside the repository makes a commit unrenderable as well'
 
 # A .. after a symlink leads to its target's parent; resolved as text it would hash a file Helm never reads.
 mkdir -p "$temporary/dotdot" && cd "$temporary/dotdot"
@@ -171,13 +185,19 @@ touch infrastructure/link/.keep infrastructure/values.yaml elsewhere/values.yaml
 git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'real directory'
 [[ "$(resolve_path HEAD infrastructure/demo ../link/../values.yaml)" == infrastructure/values.yaml ]]
 [[ "$(resolve_path HEAD . infrastructure/demo/../demo)" == infrastructure/demo ]]
-if resolve_path HEAD infrastructure/demo ../../../outside > /dev/null; then exit 1; fi
+status=0
+resolve_path HEAD infrastructure/demo ../../../outside > /dev/null || status=$?
+[[ "$status" -eq 3 ]]
 [[ -n "$(input_key HEAD infrastructure/demo)" ]]
 git rm --quiet -r infrastructure/link
 ln -s ../elsewhere/dir infrastructure/link
 git add . && git -c user.name=test -c user.email=test@example.invalid commit --quiet -m 'symlinked directory'
-if resolve_path HEAD infrastructure/demo ../link/../values.yaml > /dev/null; then exit 1; fi
+status=0
+resolve_path HEAD infrastructure/demo ../link/../values.yaml > /dev/null || status=$?
+[[ "$status" -eq 1 ]]
 [[ -z "$(input_key HEAD infrastructure/demo)" ]]
+# A symlink inside the commit only costs the cache; the commit stays renderable.
+renderable HEAD infrastructure/demo
 echo 'Paths resolve one component at a time against the commit, so a symlink hidden behind .. leaves no key'
 
 # Canonical comparison ignores key order and formatting, not content.

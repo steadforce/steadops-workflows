@@ -680,8 +680,27 @@ hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
 open_pull 911 "$pull" dev
 run_labeller "$c1"
 expect_unlabelled 911
-expect_comment 911 "the chart depends on \`file://$fixture/outside\`"
+expect_comment 911 "the chart reads \`file://$fixture/outside\`"
 echo 'absolute: a chart with an absolute file:// dependency is refused, not checked against today'"'"'s content'
+
+# A relative file:// dependency out of the repository reads today's content as well; the hydration finds it beside its checkout.
+new_repository escape
+CHARTS_ROOT=. DISCOVERY_DEPTH=3 BUNDLE_PATCHES=true LAYOUT=""
+chart infrastructure/demo demo release
+chart infrastructure/other other other
+yq -i '.dependencies = [{"name": "outside", "version": "1.0.0", "repository": "file://../../../outside"}]' infrastructure/demo/Chart.yaml
+yq -i '.primaryDependency = "outside"' infrastructure/demo/helm-config.yaml
+c0="$(commit initial)"
+environment_branch
+hydrate environments/dev environments/dev "$c0" dev infrastructure/demo
+pull=hydration-pull-request/dev-demo-1.0.x
+c1="$(renovate_update 92 infrastructure/demo 1.0.1)"
+hydrate "$pull" environments/dev "$c1" dev infrastructure/demo
+open_pull 921 "$pull" dev
+run_labeller "$c1"
+expect_unlabelled 921
+expect_comment 921 'the chart reads `file://../../../outside`'
+echo 'escape: a chart with a file:// dependency outside the repository is refused, not checked against today'"'"'s content'
 
 # Hydration runs finish out of order: a run for an older commit, or one whose newer update is not hydrated yet, keeps a valid label.
 new_repository ordering

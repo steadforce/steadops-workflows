@@ -131,12 +131,12 @@ hydration goldens byte for byte.
 - A commit is render-neutral without rendering when nothing a render reads changed:
   the chart directory, its `file://` dependencies recursively and its value files.
   Commits elsewhere in a monorepo therefore cost a few `git rev-parse` calls, not a
-  Helm run. A chart whose inputs reach outside the repository, or a commit with a
-  symlink on or below one of them, is rendered at every commit instead: a symlink's
-  blob does not change when its target does.
-- A chart with an absolute `file://` dependency, directly or through another
-  dependency, is refused: a render at an older commit would read today's content of
-  that path, so no history of it can be checked.
+  Helm run. A commit with a symlink on or below one of them is rendered at every
+  commit instead: a symlink's blob does not change when its target does.
+- A chart that reads anything outside the repository is refused: an absolute
+  `file://` dependency, or a relative `file://` dependency or value file whose path
+  leads out of it, directly or through another dependency. A render at an older
+  commit would read today's content of that path, so no history of it can be checked.
 - The manifests of the merge result and of the environment branch hold only regular
   files with plain names. A symlink, a submodule or a name with a control character
   refuses the pull request, label and all: it is what the pull request brought in, not
