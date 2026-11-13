@@ -439,7 +439,11 @@ renovate_chart_dir() {
             map(split("/")[0:-1] | if length == 0 then "." else join("/") end) | unique | if length == 1 then .[0] else "" end
           else "" end' <<< "$files")"
     if [[ -z "$directory" ]]; then
-        echo "it changes more than one chart, or files other than its Chart.yaml and Chart.lock$([[ "$VALUES_UPDATES" != true ]] || echo ' and values files')" >&2
+        if [[ "$VALUES_UPDATES" == true ]]; then
+            echo "it changes more than one chart, or files other than its Chart.yaml, Chart.lock and values files" >&2
+        else
+            echo "it changes more than one chart, or files other than its Chart.yaml and Chart.lock" >&2
+        fi
         return 1
     fi
     # Not piped into grep -q: it stops at the first match, and under pipefail charts_at's SIGPIPE would fail the test.

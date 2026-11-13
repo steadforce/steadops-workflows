@@ -69,7 +69,7 @@ echo 'Eligibility checks the author, the update labels and the changed files'
     pull_files() { printf '%s\n' infrastructure/demo/values.yaml infrastructure/other/values.yaml; }
     if renovate_chart_dir "$candidate" HEAD 2> /dev/null; then exit 1; fi
     pull_files() { printf '%s\n' infrastructure/demo/values.yaml infrastructure/demo/templates/deployment.yaml; }
-    [[ "$(renovate_chart_dir "$candidate" HEAD 2>&1 >/dev/null)" == *'files other than its Chart.yaml and Chart.lock and values files'* ]]
+    [[ "$(renovate_chart_dir "$candidate" HEAD 2>&1 >/dev/null)" == *'files other than its Chart.yaml, Chart.lock and values files'* ]]
     pull_files() { printf '%s\n' infrastructure/demo/config/values.yaml; }
     if renovate_chart_dir "$candidate" HEAD 2> /dev/null; then exit 1; fi
     VALUES_UPDATES=false
@@ -83,6 +83,21 @@ echo 'Eligibility checks the author, the update labels and the changed files'
     [[ "$(renovate_chart_dir "$(jq '.labels = [{name:"update:digest"}]' <<< "$candidate")" HEAD 2>&1 >/dev/null)" == *'its update type is not one of update:patch, update:minor'* ]]
 )
 echo 'Eligibility takes values files only with values-updates, and manual labels outweigh eligible ones'
+
+# The inputs are checked before anything else runs, so a misconfigured caller fails instead of labelling by surprise.
+(
+    sha="$(printf '%040d' 0)" output=""
+    MANUAL_UPDATE_LABELS='"update:manual"'
+    output="$(main "$sha" 2>&1)" && exit 1
+    [[ "$output" == *'manual-update-labels must be a JSON array of labels that are not eligible'* ]]
+    MANUAL_UPDATE_LABELS='["update:minor"]'
+    output="$(main "$sha" 2>&1)" && exit 1
+    [[ "$output" == *'manual-update-labels must be a JSON array of labels that are not eligible'* ]]
+    MANUAL_UPDATE_LABELS='["update:manual"]' VALUES_UPDATES=yes
+    output="$(main "$sha" 2>&1)" && exit 1
+    [[ "$output" == *'values-updates must be true or false'* ]]
+)
+echo 'Manual labels that are no array or overlap the eligible ones, and a values-updates that is no boolean, stop the run'
 
 (
     pull_files() {
