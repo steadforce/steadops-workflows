@@ -48,4 +48,7 @@ tests/regenerate-golden.sh
 
 Review the diff before committing it. Helm renders trailing whitespace
 differently between releases, so the goldens are only valid for the Helm version
-pinned in both the script and the test workflow.
+pinned in the script, in `test-helm-hydration.yaml` and in
+`validate-renovate-rollout.yaml`. Renovate updates the three in one pull request;
+when the new version renders differently, its checks fail until the goldens are
+regenerated on its branch.
