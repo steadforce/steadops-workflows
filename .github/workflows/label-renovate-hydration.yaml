@@ -24,6 +24,11 @@
 #                    helm-hydration.yaml does; when set it only has to agree.
 #   eligible-update-labels
 #                  – Renovate update-type labels eligible for unattended rollout.
+#   manual-update-labels
+#                  – Labels that keep a pull request with a person although it
+#                    carries an eligible one; update:major always does.
+#   values-updates – Whether an update may also change the chart's values files,
+#                    where Renovate updates the images a chart pins.
 #   sha            – Source commit; empty checks the latest source-branch commit.
 #
 # Triggers
@@ -66,6 +71,14 @@ on:
         description: JSON array of update-type labels eligible for cluster rollout; independent of source automerge policy.
         default: '["update:patch","update:minor"]'
         type: string
+      manual-update-labels:
+        description: JSON array of labels that keep a pull request with a person although it carries an eligible one; update:major always does.
+        default: '[]'
+        type: string
+      values-updates:
+        description: Also accept updates that change the chart's values files, e.g. Renovate image updates.
+        default: false
+        type: boolean
       helm-version:
         description: Helm CLI version, as passed to helm-hydration.yaml.
         default: latest
@@ -160,4 +173,6 @@ jobs:
         LAYOUT: ${{ inputs.layout }}
         RENOVATE_AUTHOR: ${{ inputs.renovate-author }}
         ELIGIBLE_UPDATE_LABELS: ${{ inputs.eligible-update-labels }}
+        MANUAL_UPDATE_LABELS: ${{ inputs.manual-update-labels }}
+        VALUES_UPDATES: ${{ inputs.values-updates }}
       run: bash ../.steadops/scripts/label-renovate-hydration.sh "$SOURCE_SHA"

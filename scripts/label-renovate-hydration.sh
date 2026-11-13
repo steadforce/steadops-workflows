@@ -10,6 +10,11 @@ LAYOUT="${LAYOUT:-}"
 RENOVATE_AUTHOR="${RENOVATE_AUTHOR:-renovate[bot]}"
 ELIGIBLE_UPDATE_LABELS="${ELIGIBLE_UPDATE_LABELS:-}"
 [[ -n "$ELIGIBLE_UPDATE_LABELS" ]] || ELIGIBLE_UPDATE_LABELS='["update:patch","update:minor"]'
+# Labels that keep a pull request with a person although it carries an eligible one; update:major always does.
+MANUAL_UPDATE_LABELS="${MANUAL_UPDATE_LABELS:-}"
+[[ -n "$MANUAL_UPDATE_LABELS" ]] || MANUAL_UPDATE_LABELS='[]'
+# Whether an update may change the chart's values files as well, which is where Renovate updates the images a chart pins.
+VALUES_UPDATES="${VALUES_UPDATES:-false}"
 RETRY_SECONDS="${RETRY_SECONDS:-10}"
 readonly LABEL=renovate-hydration MARKER='<!-- renovate-hydration -->' LABELLER='github-actions[bot]'
 readonly BLOCKED=gatekeeper-blocked GATEKEEPER_MARKER='<!-- gatekeeper-'
@@ -412,25 +417,33 @@ hydrated() {
 
 # The chart directory an eligible Renovate pull request merged as a commit updates, or the reason on stderr.
 renovate_chart_dir() {
-    local pull="$1" commit="$2" files integrated directory charts
+    local pull="$1" commit="$2" files integrated directory charts manual
     if [[ "$(jq -r .user.login <<< "$pull")" != "$RENOVATE_AUTHOR" ]]; then
         echo "it was opened by $(jq -r .user.login <<< "$pull"), not $RENOVATE_AUTHOR" >&2
         return 1
     fi
-    if ! jq -e --argjson eligible "$ELIGIBLE_UPDATE_LABELS" 'any(.labels[]; .name as $label | $eligible | index($label) != null)
-        and all(.labels[]; .name != "update:major")' <<< "$pull" > /dev/null; then
+    manual="$(jq -r --argjson manual "$MANUAL_UPDATE_LABELS" '[.labels[].name as $label | $manual + ["update:major"] | select(index($label) != null) | $label] | first // empty' <<< "$pull")" || return 1
+    if [[ -n "$manual" ]]; then
+        echo "it carries \`$manual\`, which keeps it with a person" >&2
+        return 1
+    fi
+    if ! jq -e --argjson eligible "$ELIGIBLE_UPDATE_LABELS" 'any(.labels[]; .name as $label | $eligible | index($label) != null)' <<< "$pull" > /dev/null; then
         echo "its update type is not one of $(jq -r 'join(", ")' <<< "$ELIGIBLE_UPDATE_LABELS")" >&2
         return 1
     fi
     files="$(pull_files "$(jq -r .number <<< "$pull")")" || return 1
     integrated="$(pull_files "$(jq -r .number <<< "$pull")" "$commit")" || return 1
     files="$(printf '%s\n%s\n' "$files" "$integrated" | LC_ALL=C sort -u)"
-    directory="$(jq -Rsr 'split("\n") | map(select(length > 0))
-        | if length > 0 and all(test("(^|/)Chart\\.(yaml|lock)$")) then
+    directory="$(jq -Rsr --argjson values "$VALUES_UPDATES" 'split("\n") | map(select(length > 0))
+        | if length > 0 and all(test(if $values then "(^|/)(Chart\\.(yaml|lock)|values[^/]*\\.ya?ml)$" else "(^|/)Chart\\.(yaml|lock)$" end)) then
             map(split("/")[0:-1] | if length == 0 then "." else join("/") end) | unique | if length == 1 then .[0] else "" end
           else "" end' <<< "$files")"
     if [[ -z "$directory" ]]; then
-        echo "it changes more than one chart's Chart.yaml and Chart.lock" >&2
+        if [[ "$VALUES_UPDATES" == true ]]; then
+            echo "it changes more than one chart, or files other than its Chart.yaml, Chart.lock and values files" >&2
+        else
+            echo "it changes more than one chart, or files other than its Chart.yaml and Chart.lock" >&2
+        fi
         return 1
     fi
     # Not piped into grep -q: it stops at the first match, and under pipefail charts_at's SIGPIPE would fail the test.
@@ -673,6 +686,9 @@ main() {
     [[ "$#" -eq 1 && "$1" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected a full source commit SHA' >&2; return 1; }
     jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and . != "update:major")' <<< "$ELIGIBLE_UPDATE_LABELS" > /dev/null \
         || { echo 'eligible-update-labels must be a JSON array of labels other than update:major' >&2; return 1; }
+    jq -e --argjson eligible "$ELIGIBLE_UPDATE_LABELS" 'type == "array" and all(.[]; type == "string" and length > 0 and (. as $label | $eligible | index($label) == null))' <<< "$MANUAL_UPDATE_LABELS" > /dev/null \
+        || { echo 'manual-update-labels must be a JSON array of labels that are not eligible' >&2; return 1; }
+    [[ "$VALUES_UPDATES" == true || "$VALUES_UPDATES" == false ]] || { echo 'values-updates must be true or false' >&2; return 1; }
     [[ "$CHARTS_ROOT" == . || "$CHARTS_ROOT" =~ ^(\./)?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*/?$ ]] || { echo "charts-root '$CHARTS_ROOT' is not a relative path" >&2; return 1; }
     [[ "$DISCOVERY_DEPTH" =~ ^[1-9][0-9]*$ ]] || { echo 'chart-discovery-depth must be a positive number' >&2; return 1; }
     [[ "$BUNDLE_PATCHES" == true || "$BUNDLE_PATCHES" == false ]] || { echo 'bundle-patches-in-one-pr must be true or false' >&2; return 1; }
