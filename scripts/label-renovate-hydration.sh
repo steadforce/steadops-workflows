@@ -326,7 +326,7 @@ build_dependencies() {
 }
 # Renders a chart for an environment into $3 the way helm-hydration.yaml does, from the root of a checkout.
 render_tree() {
-    local chart_dir="$1" environment="$2" output="$3" config release namespace apis value_files
+    local chart_dir="$1" environment="$2" output="$3" config release namespace apis value_files manifest
     local -a arguments=()
     config="$(in_chart "$chart_dir" helm-config.yaml)"
     release="$(yq 'explode(.) | .releaseName // ""' "$config")" || return 1
@@ -339,7 +339,11 @@ render_tree() {
     [[ -z "$value_files" ]] || arguments+=(-f "$value_files")
     helm template "$release" "$chart_dir" "${arguments[@]}" -n "$namespace" \
         --output-dir "$output" --include-crds --release-name --skip-tests > /dev/null || return 1
-    find "$output" -type f \( -name '*.yaml' -o -name '*.yml' \) -exec yq -i "$CRD_ANNOTATIONS" {} \; || return 1
+    # Only files holding a CRD, like helm-hydration.yaml: yq -i rewrites a whole file in its own formatting.
+    while IFS= read -r -d '' manifest; do
+        grep -qE '^kind:[[:space:]]*["'\'']?CustomResourceDefinition["'\'']?[[:space:]]*$' "$manifest" || continue
+        yq -i "$CRD_ANNOTATIONS" "$manifest" || return 1
+    done < <(find "$output" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0)
 }
 # The canonical render of a chart at a commit for an environment, cached by its inputs; empty where the commit does not hydrate it, status 2 when it cannot be rendered.
 rendered() {
