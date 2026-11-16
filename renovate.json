@@ -2,5 +2,27 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The Helm the goldens are rendered with, outside a setup-helm step: test-helm-hydration.yaml and tests/regenerate-golden.sh.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/test-helm-hydration\\.yaml$/",
+        "/^tests/regenerate-golden\\.sh$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) packageName=(?<packageName>\\S+)\\s*\\n[^\\n]*?(?:helm-version: |EXPECTED_HELM_VERSION=\")(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The goldens hold for one Helm version, so every Helm pin moves in one pull request; a version that renders differently fails until tests/regenerate-golden.sh is run on its branch.",
+      "matchDepNames": [
+        "helm"
+      ],
+      "groupName": "helm"
+    }
   ]
 }

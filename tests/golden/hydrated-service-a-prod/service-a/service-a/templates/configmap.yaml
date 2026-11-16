@@ -13,3 +13,4 @@ data:
     sum by (job) (
       rate(errors_total[5m])
     ) > 0
+

@@ -28,7 +28,9 @@
 # Updating the golden manifests
 # -----------------------------
 # Run tests/regenerate-golden.sh and commit the diff. The goldens depend on the
-# Helm version, so the version pinned below and the one in that script must match.
+# Helm version, so the version pinned below, the one in that script and the one
+# in validate-renovate-rollout.yaml must match. Renovate updates the three in one
+# pull request, which fails until the goldens are regenerated on its branch.
 
 name: Test helm hydration
 
@@ -54,7 +56,8 @@ jobs:
   hydrate-single-chart:
     uses: ./.github/workflows/helm-hydration.yaml
     with:
-      helm-version: v3.19.0
+      # renovate: datasource=github-releases depName=helm packageName=helm/helm
+      helm-version: v4.3.2
       charts-root: tests/fixtures/single-chart
       chart-discovery-depth: 1
       create-pull-request: false
@@ -67,7 +70,8 @@ jobs:
   hydrate-monorepo:
     uses: ./.github/workflows/helm-hydration.yaml
     with:
-      helm-version: v3.19.0
+      # renovate: datasource=github-releases depName=helm packageName=helm/helm
+      helm-version: v4.3.2
       charts-root: tests/fixtures/monorepo
       chart-discovery-depth: 2
       create-pull-request: false

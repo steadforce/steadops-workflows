@@ -13,8 +13,10 @@ set -euo pipefail
 
 # Helm renders trailing whitespace differently between releases, so the goldens
 # are only valid for one Helm version. Keep this in sync with the helm-version
-# input in .github/workflows/test-helm-hydration.yaml.
-readonly EXPECTED_HELM_VERSION="v3.19.0"
+# input in .github/workflows/test-helm-hydration.yaml and the Helm of
+# .github/workflows/validate-renovate-rollout.yaml; Renovate updates all three.
+# renovate: datasource=github-releases depName=helm packageName=helm/helm
+readonly EXPECTED_HELM_VERSION="v4.3.2"
 
 # Each entry is "<charts-root>:<discovery-depth>" and matches one call of the
 # hydration workflow in the test workflow.
