@@ -137,8 +137,13 @@ branch_version() {
     fi
     printf '%s\n' "$version"
 }
+# The version a hydration pull request's branch names after the given prefix; empty for another chart's or environment's branch.
+head_version() {
+    jq -r --arg prefix "$2" '.head.ref | select(startswith($prefix)) | ltrimstr($prefix) | select(test("^v?[0-9]+\\.[0-9]+\\."))' <<< "$1"
+}
+# Charts versioned like v1.2.3 keep the v in their branch name, as helm-hydration.yaml takes the version from the lock file; it plays no part in the order.
 version_order() {
-    jq -ner --arg left "$1" --arg right "$2" '
+    jq -ner --arg left "${1#v}" --arg right "${2#v}" '
         def numeric: [length, .];
         def is_bundled: test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.x$");
         def bundled:
@@ -631,8 +636,7 @@ label_update() {
         pr="$(jq -r .number <<< "$pull")"
         environment="$(jq -r .base.ref <<< "$pull")"
         environment="${environment#"$ENVIRONMENT_PREFIX"}"
-        other="$(jq -r --arg prefix "$BRANCH_PREFIX$environment$suffix-" \
-            '.head.ref | select(startswith($prefix)) | ltrimstr($prefix) | select(test("^[0-9]+\\.[0-9]+\\."))' <<< "$pull")"
+        other="$(head_version "$pull" "$BRANCH_PREFIX$environment$suffix-")"
         [[ -n "$other" ]] || continue
         found=$((found + 1))
         labelled=false
