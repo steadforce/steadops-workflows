@@ -115,6 +115,7 @@ other charts consume via `file://` is not.
 | `eligible-update-labels` | JSON array, default `["update:patch","update:minor"]` |
 | `manual-update-labels` | JSON array, default `[]`; labels that keep a PR manual besides `update:major` |
 | `values-updates` | `false`; `true` also accepts changes to the chart's `values*.yaml`, where Renovate updates pinned images |
+| `ignored-pod-annotations` | JSON array, default `[]`; pod template annotations the chart sets to a random value on every render, such as `rollme`, left out of the comparison |
 | `layout` | Optional `single-chart` or `multi-chart`; derived, and only checked when set |
 | `source-branch` / `renovate-author` | `main` / `renovate[bot]` |
 

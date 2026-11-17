@@ -493,6 +493,7 @@ requests with that label; the labeller itself never merges and never accesses a 
 | `eligible-update-labels` | JSON array of Renovate update-type labels eligible for unattended rollout | `["update:patch","update:minor"]` | No |
 | `manual-update-labels` | JSON array of labels that keep a PR with a person although it carries an eligible one; `update:major` always does | `[]` | No |
 | `values-updates` | Also accept updates that change the chart's `values*.yaml` files, e.g. Renovate image updates | `false` | No |
+| `ignored-pod-annotations` | JSON array of pod template annotations the chart sets to a random value on every render, e.g. `rollme`; left out of the comparison | `[]` | No |
 | `layout` | `single-chart` or `multi-chart`; derived from the discovery, only checked when set | `""` | No |
 | `sha` | Source commit; empty checks the latest commit of `source-branch` | `""` | No |
 | `source-branch` | Branch the charts and the Renovate pull requests live on | `main` | No |

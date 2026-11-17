@@ -15,6 +15,9 @@ MANUAL_UPDATE_LABELS="${MANUAL_UPDATE_LABELS:-}"
 [[ -n "$MANUAL_UPDATE_LABELS" ]] || MANUAL_UPDATE_LABELS='[]'
 # Whether an update may change the chart's values files as well, which is where Renovate updates the images a chart pins.
 VALUES_UPDATES="${VALUES_UPDATES:-false}"
+# Pod template annotations a chart fills with a random value on every render, such as rollme; dropped from both sides of the comparison.
+IGNORED_POD_ANNOTATIONS="${IGNORED_POD_ANNOTATIONS:-}"
+[[ -n "$IGNORED_POD_ANNOTATIONS" ]] || IGNORED_POD_ANNOTATIONS='[]'
 RETRY_SECONDS="${RETRY_SECONDS:-10}"
 readonly LABEL=renovate-hydration MARKER='<!-- renovate-hydration -->' LABELLER='github-actions[bot]'
 readonly BLOCKED=gatekeeper-blocked GATEKEEPER_MARKER='<!-- gatekeeper-'
@@ -297,6 +300,18 @@ input_key() {
 }
 
 cache_key() { printf '%s\0' "$@" | sha256sum | cut -d' ' -f1; }
+# Drops IGNORED_POD_ANNOTATIONS from every pod template, whichever workload or CronJob holds it; a document without one passes unchanged.
+without_ignored_annotations() {
+    if [[ "$IGNORED_POD_ANNOTATIONS" == '[]' ]]; then
+        cat
+        return
+    fi
+    jq -c --argjson ignored "$IGNORED_POD_ANNOTATIONS" '
+        reduce (paths(objects) | select(.[-1] == "template")) as $template (.;
+            if (getpath($template + ["metadata", "annotations"]) | type) == "object"
+            then delpaths([$ignored[] as $key | $template + ["metadata", "annotations", $key]])
+            else . end)'
+}
 canonical() {
     local directory="$1" file
     [[ -d "$directory" ]] || return 0
@@ -304,7 +319,7 @@ canonical() {
         # JSON-encoded: a raw name could carry a newline and a fake boundary to the next file.
         printf '== %s\n' "$(jq -nr --arg file "$file" '$file | @json')"
         case "$file" in
-            *.yaml|*.yml|*.json) yq -o=json -I=0 'sort_keys(..)' "$directory/$file" || return 1 ;;
+            *.yaml|*.yml|*.json) yq -o=json -I=0 'sort_keys(..)' "$directory/$file" | without_ignored_annotations || return 1 ;;
             *) sha256sum < "$directory/$file" || return 1 ;;
         esac
     done < <(find "$directory" -type f -printf '%P\0' | LC_ALL=C sort -z)
@@ -693,6 +708,8 @@ main() {
     jq -e --argjson eligible "$ELIGIBLE_UPDATE_LABELS" 'type == "array" and all(.[]; type == "string" and length > 0 and (. as $label | $eligible | index($label) == null))' <<< "$MANUAL_UPDATE_LABELS" > /dev/null \
         || { echo 'manual-update-labels must be a JSON array of labels that are not eligible' >&2; return 1; }
     [[ "$VALUES_UPDATES" == true || "$VALUES_UPDATES" == false ]] || { echo 'values-updates must be true or false' >&2; return 1; }
+    jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' <<< "$IGNORED_POD_ANNOTATIONS" > /dev/null \
+        || { echo 'ignored-pod-annotations must be a JSON array of annotation names' >&2; return 1; }
     [[ "$CHARTS_ROOT" == . || "$CHARTS_ROOT" =~ ^(\./)?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*/?$ ]] || { echo "charts-root '$CHARTS_ROOT' is not a relative path" >&2; return 1; }
     [[ "$DISCOVERY_DEPTH" =~ ^[1-9][0-9]*$ ]] || { echo 'chart-discovery-depth must be a positive number' >&2; return 1; }
     [[ "$BUNDLE_PATCHES" == true || "$BUNDLE_PATCHES" == false ]] || { echo 'bundle-patches-in-one-pr must be true or false' >&2; return 1; }
