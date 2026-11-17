@@ -353,7 +353,18 @@ echo 'The branch version follows primaryDependency, Chart.lock and bundle-patche
 if version_order 1.2.3-01 1.2.3 > /dev/null 2>&1; then exit 1; fi
 if version_order 1.2.x 1.2.3 > /dev/null 2>&1; then exit 1; fi
 if version_order invalid 1.2.3 > /dev/null 2>&1; then exit 1; fi
-echo 'Version ordering follows SemVer prerelease precedence and separately compares bundled branches'
+[[ "$(version_order v1.21.x v1.22.x)" == -1 ]]
+[[ "$(version_order v1.21.4 v1.21.3)" == 1 ]]
+[[ "$(version_order v1.21.3 1.21.3)" == 0 ]]
+if version_order vv1.2.3 1.2.3 > /dev/null 2>&1; then exit 1; fi
+echo 'Version ordering follows SemVer prerelease precedence, separately compares bundled branches and ignores a leading v'
+
+prefix=hydration-pull-request/dev-
+[[ "$(head_version '{"head":{"ref":"hydration-pull-request/dev-1.21.x"}}' "$prefix")" == 1.21.x ]]
+[[ "$(head_version '{"head":{"ref":"hydration-pull-request/dev-v1.21.x"}}' "$prefix")" == v1.21.x ]]
+[[ -z "$(head_version '{"head":{"ref":"hydration-pull-request/dev-loki-6.4.x"}}' "$prefix")" ]]
+[[ -z "$(head_version '{"head":{"ref":"hydration-pull-request/prod-1.21.x"}}' "$prefix")" ]]
+echo 'The branch version is read from the pull request branch, with or without a leading v'
 
 check_workflow_revision() (
     local metadata="$1" expected="$2"
