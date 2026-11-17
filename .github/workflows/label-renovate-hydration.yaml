@@ -29,6 +29,9 @@
 #                    carries an eligible one; update:major always does.
 #   values-updates – Whether an update may also change the chart's values files,
 #                    where Renovate updates the images a chart pins.
+#   ignored-pod-annotations
+#                  – Pod template annotations the chart sets to a random value
+#                    on every render, e.g. rollme; left out of the comparison.
 #   sha            – Source commit; empty checks the latest source-branch commit.
 #
 # Triggers
@@ -79,6 +82,10 @@ on:
         description: Also accept updates that change the chart's values files, e.g. Renovate image updates.
         default: false
         type: boolean
+      ignored-pod-annotations:
+        description: JSON array of pod template annotations the chart sets to a random value on every render, e.g. rollme; left out of the comparison.
+        default: '[]'
+        type: string
       helm-version:
         description: Helm CLI version, as passed to helm-hydration.yaml.
         default: latest
@@ -175,4 +182,5 @@ jobs:
         ELIGIBLE_UPDATE_LABELS: ${{ inputs.eligible-update-labels }}
         MANUAL_UPDATE_LABELS: ${{ inputs.manual-update-labels }}
         VALUES_UPDATES: ${{ inputs.values-updates }}
+        IGNORED_POD_ANNOTATIONS: ${{ inputs.ignored-pod-annotations }}
       run: bash ../.steadops/scripts/label-renovate-hydration.sh "$SOURCE_SHA"

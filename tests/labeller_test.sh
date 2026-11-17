@@ -96,8 +96,14 @@ echo 'Eligibility takes values files only with values-updates, and manual labels
     MANUAL_UPDATE_LABELS='["update:manual"]' VALUES_UPDATES=yes
     output="$(main "$sha" 2>&1)" && exit 1
     [[ "$output" == *'values-updates must be true or false'* ]]
+    VALUES_UPDATES=false IGNORED_POD_ANNOTATIONS='"rollme"'
+    output="$(main "$sha" 2>&1)" && exit 1
+    [[ "$output" == *'ignored-pod-annotations must be a JSON array of annotation names'* ]]
+    IGNORED_POD_ANNOTATIONS='[""]'
+    output="$(main "$sha" 2>&1)" && exit 1
+    [[ "$output" == *'ignored-pod-annotations must be a JSON array of annotation names'* ]]
 )
-echo 'Manual labels that are no array or overlap the eligible ones, and a values-updates that is no boolean, stop the run'
+echo 'Manual labels that are no array or overlap the eligible ones, a values-updates that is no boolean and ignored annotations that are no names stop the run'
 
 (
     pull_files() {
@@ -254,6 +260,27 @@ canonical "$temporary/second" > "$temporary/second.canonical"
 printf 'not: [valid\n' > "$temporary/second/config.yaml"
 if canonical "$temporary/second" > /dev/null 2>&1; then exit 1; fi
 echo 'Canonical comparison ignores formatting and names the files that differ'
+
+# A random pod template annotation is dropped only when named, only from pod templates, and only that key.
+(
+    mkdir -p "$temporary/random/first" "$temporary/random/second"
+    deployment='apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: demo, annotations: {rollme: %s}}\nspec:\n  template:\n    metadata: {annotations: {rollme: %s, keep: same}}\n'
+    cronjob='---\napiVersion: batch/v1\nkind: CronJob\nmetadata: {name: demo}\nspec: {jobTemplate: {spec: {template: {metadata: {annotations: {rollme: %s}}}}}}\n'
+    printf "$deployment$cronjob" top abc abc > "$temporary/random/first/workload.yaml"
+    printf "$deployment$cronjob" top xyz xyz > "$temporary/random/second/workload.yaml"
+    [[ "$(canonical "$temporary/random/first")" != "$(canonical "$temporary/random/second")" ]]
+    IGNORED_POD_ANNOTATIONS='["rollme"]'
+    [[ "$(canonical "$temporary/random/first")" == "$(canonical "$temporary/random/second")" ]]
+    [[ "$(canonical "$temporary/random/first")" == *'"keep":"same"'* ]]
+    printf "$deployment$cronjob" other xyz xyz > "$temporary/random/second/workload.yaml"
+    [[ "$(canonical "$temporary/random/first")" != "$(canonical "$temporary/random/second")" ]]
+    printf 'kind: ConfigMap\napiVersion: v1\nmetadata: {name: demo}\n' > "$temporary/random/first/config.yaml"
+    IGNORED_POD_ANNOTATIONS='[]'
+    without="$(canonical "$temporary/random/first")"
+    IGNORED_POD_ANNOTATIONS='["unused"]'
+    [[ "$(canonical "$temporary/random/first")" == "$without" ]]
+)
+echo 'Ignored pod annotations leave out a random rollme from pod templates and nothing else'
 
 # A file name with a newline cannot fake the boundary to another file and so stand in for a deleted manifest.
 mkdir -p "$temporary/names/render" "$temporary/names/crafted"
