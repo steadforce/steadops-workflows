@@ -83,7 +83,7 @@ jobs:
       #                     still run.
       # --color=always      The job log renders ANSI colours.
       # The exit code is non-zero on any reported finding, failing the job.
-      uses: docker://ghcr.io/zizmorcore/zizmor:1.32.0
+      uses: docker://ghcr.io/zizmorcore/zizmor:1.33.1
       env:
         GH_TOKEN: ${{ secrets.token || github.token }}
       with:
